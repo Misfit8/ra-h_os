@@ -27,6 +27,7 @@ const BUNDLED_SKILLS_DIR = path.join(
   process.cwd(),
   'src/config/skills'
 );
+const SEED_MIGRATION_FLAG = path.join(SKILLS_DIR, '.seed-migrated-2026-03-07-skills-overhaul');
 
 const SEEDED_SKILL_IDS = new Set([
   'db-operations',
@@ -37,6 +38,25 @@ const SEEDED_SKILL_IDS = new Set([
   'persona',
   'calibration',
   'connect',
+]);
+
+const DEPRECATED_SKILL_IDS = new Set([
+  'start-here',
+  'schema',
+  'creating-nodes',
+  'edges',
+  'dimensions',
+  'extract',
+  'troubleshooting',
+  'integrate',
+  'test-guide',
+  'ghostwriting-brad',
+  'write-the-debrief',
+  'prep',
+  'preferences',
+  'research',
+  'survey',
+  'traverse-graph',
 ]);
 
 function ensureSkillsDir(): void {
@@ -93,6 +113,37 @@ function seedSkills(): void {
   }
 }
 
+function migrateSeededBaseline(): void {
+  if (fs.existsSync(SEED_MIGRATION_FLAG)) {
+    return;
+  }
+
+  const bundledFiles = listMarkdownFiles(BUNDLED_SKILLS_DIR);
+  const bundledById = new Map<string, string>();
+  for (const file of bundledFiles) {
+    bundledById.set(normalizeSkillId(file), path.join(BUNDLED_SKILLS_DIR, file));
+  }
+
+  for (const skillId of SEEDED_SKILL_IDS) {
+    const source = bundledById.get(skillId);
+    if (!source) continue;
+    const dest = path.join(SKILLS_DIR, `${skillId}.md`);
+    fs.copyFileSync(source, dest);
+  }
+
+  fs.writeFileSync(SEED_MIGRATION_FLAG, 'ok', 'utf-8');
+}
+
+function pruneDeprecatedSkills(): void {
+  const files = listMarkdownFiles(SKILLS_DIR);
+  for (const file of files) {
+    const normalized = normalizeSkillId(file);
+    if (DEPRECATED_SKILL_IDS.has(normalized)) {
+      fs.unlinkSync(path.join(SKILLS_DIR, file));
+    }
+  }
+}
+
 function resolveSkillFilename(name: string): string | null {
   const files = listMarkdownFiles(SKILLS_DIR);
   const normalizedInput = normalizeSkillId(name);
@@ -130,7 +181,9 @@ function init(): void {
   if (initialized) return;
   ensureSkillsDir();
   migrateLegacyGuides();
+  migrateSeededBaseline();
   seedSkills();
+  pruneDeprecatedSkills();
   initialized = true;
 }
 

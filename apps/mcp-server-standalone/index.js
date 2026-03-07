@@ -37,7 +37,7 @@ const skillService = require('./services/skillService');
 // Server info
 const serverInfo = {
   name: 'ra-h-standalone',
-  version: '1.7.0'
+  version: '1.8.0'
 };
 
 function buildInstructions() {
@@ -1012,7 +1012,7 @@ async function main() {
     'sqliteQuery',
     {
       title: 'Execute read-only SQL',
-      description: 'Execute read-only SQL queries against the knowledge graph database. Tables: nodes, edges, dimensions, node_dimensions, chunks. Use PRAGMA table_info(tablename) for schema. Only SELECT/WITH/PRAGMA allowed. Use when structured tools are insufficient — e.g., complex JOINs, aggregations, or custom filtering. Read readSkill("schema") for table definitions and query patterns.',
+      description: 'Execute read-only SQL queries against the knowledge graph database. Tables: nodes, edges, dimensions, node_dimensions, chunks. Use PRAGMA table_info(tablename) for schema. Only SELECT/WITH/PRAGMA allowed. Use when structured tools are insufficient — e.g., complex JOINs, aggregations, or custom filtering. Read readSkill("db-operations") for table definitions and query patterns.',
       inputSchema: sqliteQueryInputSchema
     },
     async ({ sql: userSql, format = 'json' }) => {
