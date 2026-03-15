@@ -2,9 +2,11 @@ import { getSQLiteClient } from './sqlite-client';
 import { Edge, EdgeContext, EdgeData, EdgeCreatedVia, NodeConnection, Node } from '@/types/database';
 import { eventBroadcaster } from '../events';
 import { nodeService } from './nodes';
+import { getOpenAiKey } from '../storage/apiKeys';
 import { generateText } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { z } from 'zod';
+import { validateEdgeExplanation } from './quality';
 
 const inferredEdgeContextSchema = z.object({
   type: z.enum(['created_by', 'part_of', 'source_of', 'related_to']),
@@ -53,7 +55,7 @@ async function inferEdgeContext(params: {
 
   // If no API key is configured, degrade gracefully.
   // We still enforce explanation, but fall back to "related_to" classification.
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = getOpenAiKey();
   if (!apiKey) {
     return { type: 'related_to', confidence: 0.0, swap_direction: false };
   }
@@ -118,11 +120,11 @@ async function autoInferEdge(params: {
 }): Promise<{ explanation: string; type: EdgeContext['type']; confidence: number; swap_direction: boolean }> {
   const { fromNode, toNode } = params;
 
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = getOpenAiKey();
   if (!apiKey) {
     // Fallback without AI
     return {
-      explanation: `Related to ${toNode.title}`,
+      explanation: `Connection to ${toNode.title}; exact relationship uncertain.`,
       type: 'related_to',
       confidence: 0.0,
       swap_direction: false,
@@ -181,8 +183,8 @@ async function autoInferEdge(params: {
 
     const parsed = schema.safeParse(parsedJson);
     if (!parsed.success) {
-      return {
-        explanation: `Related to ${toNode.title}`,
+        return {
+        explanation: `Connection to ${toNode.title}; exact relationship uncertain.`,
         type: 'related_to',
         confidence: 0.2,
         swap_direction: false,
@@ -193,7 +195,7 @@ async function autoInferEdge(params: {
   } catch (error) {
     console.warn('[edges] autoInferEdge failed; falling back', error);
     return {
-      explanation: `Related to ${toNode.title}`,
+      explanation: `Connection to ${toNode.title}; exact relationship uncertain.`,
       type: 'related_to',
       confidence: 0.2,
       swap_direction: false,
@@ -205,13 +207,33 @@ export class EdgeService {
   async getEdges(): Promise<Edge[]> {
     const sqlite = getSQLiteClient();
     const result = sqlite.query<Edge>('SELECT * FROM edges ORDER BY created_at DESC');
-    return result.rows;
+    return result.rows.map((row: any) => {
+      let context: any = row.context;
+      if (typeof context === 'string') {
+        try {
+          context = JSON.parse(context);
+        } catch {
+          // Keep raw context string if JSON parsing fails.
+        }
+      }
+      return { ...row, context };
+    });
   }
 
   async getEdgeById(id: number): Promise<Edge | null> {
     const sqlite = getSQLiteClient();
     const result = sqlite.query<Edge>('SELECT * FROM edges WHERE id = ?', [id]);
-    return result.rows[0] || null;
+    const row: any = result.rows[0];
+    if (!row) return null;
+    let context: any = row.context;
+    if (typeof context === 'string') {
+      try {
+        context = JSON.parse(context);
+      } catch {
+        // Keep raw context string if JSON parsing fails.
+      }
+    }
+    return { ...row, context };
   }
 
   async createEdge(edgeData: EdgeData): Promise<Edge> {
@@ -249,8 +271,12 @@ export class EdgeService {
       };
     } else if (edgeData.skip_inference) {
       inferred = { type: 'related_to' as const, confidence: 0.0, swap_direction: false };
-      if (!explanation) explanation = `Related to ${toNode.title}`;
+      if (!explanation) explanation = `Connection to ${toNode.title}; exact relationship uncertain.`;
     } else {
+      const explanationError = validateEdgeExplanation(explanation);
+      if (explanationError) {
+        throw new Error(explanationError);
+      }
       inferred = await inferEdgeContext({ explanation, fromNode, toNode });
     }
 
@@ -267,14 +293,15 @@ export class EdgeService {
     };
 
     const result = sqlite.prepare(`
-      INSERT INTO edges (from_node_id, to_node_id, context, source, created_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO edges (from_node_id, to_node_id, context, source, created_at, explanation)
+      VALUES (?, ?, ?, ?, ?, ?)
     `).run(
       finalFromId,
       finalToId,
       JSON.stringify(context),
       edgeData.source,
-      now
+      now,
+      explanation
     );
 
     const edgeId = Number(result.lastInsertRowid);
@@ -316,6 +343,10 @@ export class EdgeService {
         if (!explanation) {
           throw new Error('Edge explanation is required');
         }
+        const explanationError = validateEdgeExplanation(explanation);
+        if (explanationError) {
+          throw new Error(explanationError);
+        }
 
         const existingEdge = await this.getEdgeById(id);
         if (!existingEdge) {
@@ -342,8 +373,13 @@ export class EdgeService {
           (existingContext?.created_via as EdgeCreatedVia) ||
           'ui';
 
-        // Note: On update, we don't swap direction - the edge already exists with its direction.
-        // We only update the type and confidence based on the new explanation.
+        const nextFromId = inferred.swap_direction ? existingEdge.to_node_id : existingEdge.from_node_id;
+        const nextToId = inferred.swap_direction ? existingEdge.from_node_id : existingEdge.to_node_id;
+        if (inferred.swap_direction) {
+          updates.from_node_id = nextFromId;
+          updates.to_node_id = nextToId;
+        }
+
         updates.context = {
           ...existingContext,
           ...incomingContext,
@@ -367,6 +403,18 @@ export class EdgeService {
         }
       }
     });
+
+    if (Object.prototype.hasOwnProperty.call(updates, 'explanation')) {
+      const rawExplanation = (updates as any).explanation;
+      if (typeof rawExplanation === 'string') {
+        const explanationError = validateEdgeExplanation(rawExplanation);
+        if (explanationError) {
+          throw new Error(explanationError);
+        }
+        updateFields.push('explanation = ?');
+        params.push(rawExplanation.trim());
+      }
+    }
 
     if (updateFields.length === 0) {
       throw new Error('No valid fields to update');
@@ -429,7 +477,7 @@ export class EdgeService {
           WHEN e.from_node_id = ? THEN n_to.title
           ELSE n_from.title
         END as connected_node_title,
-        CASE 
+        CASE
           WHEN e.from_node_id = ? THEN n_to.notes
           ELSE n_from.notes
         END as connected_node_notes,

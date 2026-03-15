@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { edgeService } from '@/services/database';
+import { validateEdgeExplanation } from '@/services/database/quality';
 
 export const runtime = 'nodejs';
 
@@ -57,8 +58,16 @@ export async function POST(request: NextRequest) {
 
     const fromId = parseInt(body.from_node_id);
     const toId = parseInt(body.to_node_id);
-    // Explanation can be empty - service will auto-generate
     const explanation = String(body.explanation || '').trim();
+    if (explanation) {
+      const explanationError = validateEdgeExplanation(explanation);
+      if (explanationError) {
+        return NextResponse.json({
+          success: false,
+          error: explanationError
+        }, { status: 400 });
+      }
+    }
 
     const skipInference = Boolean(body.skip_inference);
     const createdVia = (() => {

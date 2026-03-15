@@ -3,33 +3,24 @@ import { z } from 'zod';
 import { edgeService } from '@/services/database/edges';
 import { nodeService } from '@/services/database/nodes';
 import { formatNodeForChat } from '../infrastructure/nodeFormatter';
+import { validateEdgeExplanation } from '@/services/database/quality';
 
 export const createEdgeTool = tool({
   description:
-    'Create directed relationship between nodes.\n\n' +
-    'Direction rule: FROM node → TO node should read correctly.\n' +
-    'Prefer the 4 core relations unless the user clearly wants an advanced intellectual relation:\n' +
-    '- Made by → created_by (attribution)\n' +
-    '- Part of → part_of (attribution)\n' +
-    '- Came from → source_of (intellectual)\n' +
-    '- Related → related_to (intellectual fallback)\n\n' +
-    'Examples:\n' +
-    '- Episode → Podcast: "Episode of this podcast"\n' +
-    '- Book → Author: "Written by"\n' +
-    '- Company → Founder: "Founded by"\n' +
-    '- Insight → Source: "Came from / inspired by"\n',
+    'Create a relationship between two nodes. Provide an explanation and the system will infer the type and direction.\n\n' +
+    'Examples of explanations:\n' +
+    '- "Written by" (book → author)\n' +
+    '- "Episode of this podcast" (episode → podcast)\n' +
+    '- "Inspired this insight" (source → derivative)\n' +
+    '- "Related concept" (general relationship)\n',
   inputSchema: z.object({
-    from_node_id: z.number().describe('The ID of the source node (where the connection originates)'),
-    to_node_id: z.number().describe('The ID of the target node (where the connection points to)'),
+    from_node_id: z.number().describe('The ID of the source node'),
+    to_node_id: z.number().describe('The ID of the target node'),
     explanation: z.string().describe(
-      'REQUIRED: Why does this connection exist? Be specific. ' +
-      'Write it as a relationship that reads FROM → TO. ' +
-      'Examples: "Author of this book", "Guest on this podcast", ' +
-      '"Episode of this podcast", "This insight came from this podcast episode", "Extends the concept introduced here"'
+      'REQUIRED: Why does this connection exist? The system will infer the relationship type from your explanation.'
     ),
     source: z.enum(['user', 'ai', 'ai_similarity', 'helper_name']).default('ai').describe(
-      'Source of this edge. Use "ai" (or "helper_name") for AI-created connections, ' +
-      '"user" for manual connections, "ai_similarity" for similarity-based connections.'
+      'Source of this edge. Use "ai" for AI-created, "user" for manual, "ai_similarity" for similarity-based.'
     )
   }),
   execute: async (params) => {
@@ -66,6 +57,14 @@ export const createEdgeTool = tool({
         return {
           success: false,
           error: 'explanation is required. Provide a clear reason for why these two nodes should be connected.',
+          data: null
+        };
+      }
+      const explanationError = validateEdgeExplanation(explanation);
+      if (explanationError) {
+        return {
+          success: false,
+          error: explanationError,
           data: null
         };
       }

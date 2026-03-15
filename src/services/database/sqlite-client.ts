@@ -19,12 +19,10 @@ class SQLiteClient {
   private db: Database.Database;
   private config: SQLiteConfig;
   private readonly readOnly: boolean;
-  private readonly embeddingsDisabled: boolean;
 
   private constructor() {
     this.config = this.getSQLiteConfig();
     this.readOnly = process.env.SQLITE_READONLY === 'true';
-    this.embeddingsDisabled = process.env.DISABLE_EMBEDDINGS === 'true';
     
     // Initialize database connection
     const dbDirectory = path.dirname(this.config.dbPath);
@@ -35,15 +33,13 @@ class SQLiteClient {
       ? new Database(this.config.dbPath, { readonly: true, fileMustExist: true })
       : new Database(this.config.dbPath);
     
-    // Load sqlite-vec extension (skip entirely if embeddings are disabled)
-    if (!this.embeddingsDisabled) {
-      try {
-        this.db.loadExtension(this.config.vecExtensionPath);
-        console.log('SQLite vector extension loaded successfully');
-      } catch (error) {
-        // Do not fail hard — allow the app to run without vector features
-        console.error('Warning: Failed to load vector extension:', error);
-      }
+    // Load sqlite-vec extension
+    try {
+      this.db.loadExtension(this.config.vecExtensionPath);
+      console.log('SQLite vector extension loaded successfully');
+    } catch (error) {
+      // Do not fail hard — allow the app to run without vector features
+      console.error('Warning: Failed to load vector extension:', error);
     }
 
     // Configure SQLite settings
@@ -61,11 +57,9 @@ class SQLiteClient {
       this.db.pragma('temp_store = memory');
       this.db.pragma('busy_timeout = 5000');
 
-      // Ensure vector virtual tables are present and healthy (skip if disabled)
-      if (!this.embeddingsDisabled) {
-        this.ensureVectorTables();
-        this.healVectorTablesIfCorrupt();
-      }
+      // Ensure vector virtual tables are present and healthy
+      this.ensureVectorTables();
+      this.healVectorTablesIfCorrupt();
 
       // Ensure logging schema (rename memory->logs if needed, create triggers/views)
       this.ensureLoggingAndMemorySchema();
@@ -140,9 +134,7 @@ class SQLiteClient {
       } as DatabaseError;
     }
     // Proactively validate/repair vec vtables before any write transaction
-    if (!this.embeddingsDisabled) {
-      this.healVectorTablesIfCorrupt();
-    }
+    this.healVectorTablesIfCorrupt();
     const txn = this.db.transaction(callback);
     try {
       return txn();
@@ -162,9 +154,6 @@ class SQLiteClient {
   }
 
   public async checkVectorExtension(): Promise<boolean> {
-    if (this.embeddingsDisabled) {
-      return false;
-    }
     try {
       const result = this.query('SELECT vec_version() as version');
       return result.rows.length > 0;
@@ -266,7 +255,6 @@ class SQLiteClient {
           }
         };
         ensureNodeCol('description', "ALTER TABLE nodes ADD COLUMN description TEXT;");
-        // type column removed in final schema pass
       } catch (nodeErr) {
         console.warn('Failed to ensure nodes columns:', nodeErr);
       }
@@ -363,6 +351,17 @@ class SQLiteClient {
                      'cache_hit', COALESCE(json_extract(NEW.metadata, '$.cache_hit'), 0),
                      'model', COALESCE(json_extract(NEW.metadata, '$.model_used'), ''),
                      'tools_count', COALESCE(json_extract(NEW.metadata, '$.tool_calls_count'), 0),
+                     'tools_used', COALESCE(json_extract(NEW.metadata, '$.tools_used'), json('[]')),
+                     'latency_ms', COALESCE(json_extract(NEW.metadata, '$.latency_ms'), 0),
+                     'prompt_build_ms', COALESCE(json_extract(NEW.metadata, '$.timing_breakdown.promptBuildMs'), 0),
+                     'tools_build_ms', COALESCE(json_extract(NEW.metadata, '$.timing_breakdown.toolsBuildMs'), 0),
+                     'model_resolve_ms', COALESCE(json_extract(NEW.metadata, '$.timing_breakdown.modelResolveMs'), 0),
+                     'message_assembly_ms', COALESCE(json_extract(NEW.metadata, '$.timing_breakdown.messageAssemblyMs'), 0),
+                     'stream_setup_ms', COALESCE(json_extract(NEW.metadata, '$.timing_breakdown.streamSetupMs'), 0),
+                     'tool_loop_ms', COALESCE(json_extract(NEW.metadata, '$.timing_breakdown.toolLoopMs'), 0),
+                     'first_token_latency_ms', COALESCE(json_extract(NEW.metadata, '$.first_token_latency_ms'), 0),
+                     'first_chunk_latency_ms', COALESCE(json_extract(NEW.metadata, '$.first_chunk_latency_ms'), 0),
+                     'tool_timings', COALESCE(json_extract(NEW.metadata, '$.tool_timings'), json('[]')),
                      'trace_id', COALESCE(json_extract(NEW.metadata, '$.trace_id'), ''),
                      'voice_tts_chars', COALESCE(json_extract(NEW.metadata, '$.voice_tts_chars'), 0),
                      'voice_tts_cost_usd', COALESCE(json_extract(NEW.metadata, '$.voice_tts_cost_usd'), 0),
@@ -435,26 +434,18 @@ class SQLiteClient {
       }
       // Do not recreate memory_v; alias has been removed.
 
-      // 6) Drop orphaned chat_memory_state table (removed in final schema pass)
-      this.db.exec(`DROP TABLE IF EXISTS chat_memory_state;`);
-
-      // Agent delegation table for orchestrator/worker coordination
+      // 6) Clean up removed chat_memory_state table
       try {
-        this.db.exec(`
-          CREATE TABLE IF NOT EXISTS agent_delegations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT UNIQUE NOT NULL,
-            task TEXT NOT NULL,
-            context TEXT,
-            expected_outcome TEXT,
-            status TEXT NOT NULL DEFAULT 'queued',
-            summary TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-          );
-        `);
+        this.db.exec(`DROP TABLE IF EXISTS chat_memory_state;`);
       } catch (e) {
-        console.warn('Failed to ensure agent_delegations table:', e);
+        // Ignore if table doesn't exist
+      }
+
+      // Clean up removed agent_delegations table
+      try {
+        this.db.exec(`DROP TABLE IF EXISTS agent_delegations;`);
+      } catch (e) {
+        console.warn('Failed to drop agent_delegations table:', e);
       }
 
       // 8) Logs retention trigger (~10k most recent rows)
@@ -623,77 +614,62 @@ class SQLiteClient {
         }
       }
 
-      // 10) Final schema pass migrations (content→notes, event_date, icon, drop dead columns)
+      // 10) Final schema pass migrations (content→notes, event_date, dimensions.icon, drop dead columns)
       try {
         const nodeCols2 = this.db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name: string }>;
-        const nodeColNames = nodeCols2.map((c: any) => c.name);
+        const nodeColNames = nodeCols2.map(c => c.name);
 
-        // Rename content → notes
+        // Rename content → notes (additive first)
         if (nodeColNames.includes('content') && !nodeColNames.includes('notes')) {
-          console.log('Renaming nodes.content → nodes.notes');
+          console.log('Migrating nodes.content → nodes.notes...');
           this.db.exec('ALTER TABLE nodes RENAME COLUMN content TO notes;');
         }
 
-        // Add event_date with backfill from metadata
+        // Add event_date
         if (!nodeColNames.includes('event_date')) {
-          console.log('Adding nodes.event_date column');
           this.db.exec('ALTER TABLE nodes ADD COLUMN event_date TEXT;');
-          this.db.exec(`
-            UPDATE nodes SET event_date = json_extract(metadata, '$.published_date')
-            WHERE metadata IS NOT NULL
-              AND json_extract(metadata, '$.published_date') IS NOT NULL
-              AND json_extract(metadata, '$.published_date') != '';
-          `);
+          // Backfill from metadata.published_date where available
+          try {
+            this.db.exec(`
+              UPDATE nodes SET event_date = json_extract(metadata, '$.published_date')
+              WHERE event_date IS NULL AND json_extract(metadata, '$.published_date') IS NOT NULL;
+            `);
+          } catch {}
         }
 
         // Add dimensions.icon
         const dimCols2 = this.db.prepare('PRAGMA table_info(dimensions)').all() as Array<{ name: string }>;
-        if (!dimCols2.some((c: any) => c.name === 'icon')) {
-          console.log('Adding dimensions.icon column');
+        if (!dimCols2.some(c => c.name === 'icon')) {
           this.db.exec('ALTER TABLE dimensions ADD COLUMN icon TEXT;');
         }
 
-        // Drop dead columns (SQLite 3.35+)
+        // Drop dead columns (requires SQLite 3.35+)
+        // nodes.type
         if (nodeColNames.includes('type')) {
-          console.log('Dropping nodes.type column');
-          try { this.db.exec('DROP INDEX IF EXISTS idx_nodes_type;'); } catch {}
-          try { this.db.exec('ALTER TABLE nodes DROP COLUMN type;'); } catch (e) {
-            console.warn('Could not drop nodes.type (SQLite < 3.35?):', e);
-          }
+          try { this.db.exec('ALTER TABLE nodes DROP COLUMN type;'); } catch {}
         }
+        // nodes.is_pinned
         if (nodeColNames.includes('is_pinned')) {
-          console.log('Dropping nodes.is_pinned column');
-          try { this.db.exec('DROP INDEX IF EXISTS idx_nodes_pinned;'); } catch {}
-          try { this.db.exec('ALTER TABLE nodes DROP COLUMN is_pinned;'); } catch (e) {
-            console.warn('Could not drop nodes.is_pinned:', e);
-          }
+          try { this.db.exec('ALTER TABLE nodes DROP COLUMN is_pinned;'); } catch {}
         }
-
-        // Drop edges.user_feedback
+        // edges.user_feedback
         const edgeCols = this.db.prepare('PRAGMA table_info(edges)').all() as Array<{ name: string }>;
-        if (edgeCols.some((c: any) => c.name === 'user_feedback')) {
-          console.log('Dropping edges.user_feedback column');
-          try { this.db.exec('ALTER TABLE edges DROP COLUMN user_feedback;'); } catch (e) {
-            console.warn('Could not drop edges.user_feedback:', e);
-          }
+        if (edgeCols.some(c => c.name === 'user_feedback')) {
+          try { this.db.exec('ALTER TABLE edges DROP COLUMN user_feedback;'); } catch {}
         }
 
-        // Rebuild FTS if it references 'content' instead of 'notes'
+        // Recreate nodes_fts to index title + description + notes
         try {
-          const ftsCheck = this.db.prepare("SELECT sql FROM sqlite_master WHERE name='nodes_fts'").get() as any;
-          if (ftsCheck && ftsCheck.sql && ftsCheck.sql.includes('content')) {
-            console.log('Rebuilding nodes_fts to reference notes instead of content');
+          const ftsCheck = this.db.prepare("SELECT sql FROM sqlite_master WHERE name='nodes_fts'").get() as { sql?: string } | undefined;
+          if (ftsCheck?.sql && (!ftsCheck.sql.includes('description') || ftsCheck.sql.includes('content'))) {
             this.db.exec('DROP TABLE IF EXISTS nodes_fts;');
-            this.db.exec(`
-              CREATE VIRTUAL TABLE nodes_fts USING fts5(title, description, notes, content=nodes, content_rowid=id);
-              INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild');
-            `);
+            this.db.exec("CREATE VIRTUAL TABLE nodes_fts USING fts5(title, description, notes, content='nodes', content_rowid='id');");
+            // Rebuild FTS index
+            this.db.exec("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild');");
           }
         } catch (ftsErr) {
-          console.warn('FTS rebuild skipped:', ftsErr);
+          console.warn('Failed to rebuild nodes_fts:', ftsErr);
         }
-
-        console.log('Final schema pass migrations complete');
       } catch (schemaErr) {
         console.warn('Final schema pass migration error:', schemaErr);
       }

@@ -26,6 +26,16 @@ export type EvalChatRow = {
   workflow_key: string | null;
   workflow_node_id: number | null;
   latency_ms: number | null;
+  first_chunk_latency_ms: number | null;
+  first_token_latency_ms: number | null;
+  prompt_build_ms: number | null;
+  tools_build_ms: number | null;
+  model_resolve_ms: number | null;
+  message_assembly_ms: number | null;
+  stream_setup_ms: number | null;
+  tool_loop_ms: number | null;
+  tools_used_json: string | null;
+  tool_calls_count: number | null;
   success: number | null;
   error: string | null;
   dataset_id: string | null;

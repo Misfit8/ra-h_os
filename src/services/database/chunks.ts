@@ -1,6 +1,75 @@
 import { getSQLiteClient } from './sqlite-client';
 import { Chunk, ChunkData } from '@/types/database';
 
+type RankedChunk = Chunk & { similarity: number };
+
+function sanitizeFtsQuery(input: string): string {
+  return input
+    .replace(/['"()*:^~{}[\]]/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(word => word.length > 0 && !/^(AND|OR|NOT|NEAR)$/i.test(word))
+    .join(' ');
+}
+
+function extractRelaxedSearchTerms(query: string): string[] {
+  const stopWords = new Set([
+    'a', 'an', 'and', 'are', 'as', 'at', 'be', 'being', 'briefly', 'by', 'find',
+    'focused', 'for', 'from', 'in', 'inside', 'is', 'it', 'me', 'my', 'of', 'on',
+    'or', 'quote', 'search', 'solutions', 'specific', 'that', 'the', 'then', 'this',
+    'to', 'transcript', 'with'
+  ]);
+
+  const rawTerms = query
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .map(term => term.trim())
+    .filter(term => term.length >= 4 && !stopWords.has(term));
+
+  const expanded = new Set<string>();
+  for (const term of rawTerms) {
+    expanded.add(term);
+    if (term.length >= 6) {
+      expanded.add(term.slice(0, 5));
+      expanded.add(term.slice(0, 6));
+    }
+    if (term.endsWith('ing') && term.length > 6) {
+      expanded.add(term.slice(0, -3));
+    }
+    if (term.endsWith('tion') && term.length > 7) {
+      expanded.add(term.slice(0, -4));
+    }
+    if (term.endsWith('ions') && term.length > 7) {
+      expanded.add(term.slice(0, -4));
+    }
+  }
+
+  return Array.from(expanded).slice(0, 12);
+}
+
+function reciprocalRankFuse<T extends { id: number }>(rankedLists: T[][], limit: number): T[] {
+  const scores = new Map<number, { score: number; item: T }>();
+  const k = 60;
+
+  rankedLists.forEach((list) => {
+    list.forEach((item, index) => {
+      const entry = scores.get(item.id);
+      const score = 1 / (k + index + 1);
+      if (entry) {
+        entry.score += score;
+      } else {
+        scores.set(item.id, { score, item });
+      }
+    });
+  });
+
+  return Array.from(scores.values())
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map(entry => entry.item);
+}
+
 export class ChunkService {
   async getChunksByNodeId(nodeId: number): Promise<Chunk[]> {
     const sqlite = getSQLiteClient();
@@ -157,7 +226,18 @@ export class ChunkService {
     fallbackQuery?: string
   ): Promise<Array<Chunk & { similarity: number }>> {
     try {
-      return await this.searchChunksSQLite(queryEmbedding, similarityThreshold, matchCount, nodeIds);
+      const vectorResults = await this.searchChunksSQLite(queryEmbedding, similarityThreshold, matchCount, nodeIds);
+
+      if (!fallbackQuery) {
+        return vectorResults;
+      }
+
+      const textResults = await this.textSearchFallback(fallbackQuery, matchCount, nodeIds);
+      if (textResults.length === 0) {
+        return vectorResults;
+      }
+
+      return reciprocalRankFuse<RankedChunk>([vectorResults, textResults], matchCount);
     } catch (error) {
       console.warn('Vector search failed, attempting text fallback:', error);
       if (fallbackQuery) {
@@ -255,6 +335,12 @@ export class ChunkService {
   ): Promise<Array<Chunk & { similarity: number }>> {
     const sqlite = getSQLiteClient();
     const startTime = Date.now();
+    const ftsResults = this.ftsSearchChunks(sqlite, query, matchCount, nodeIds);
+    if (ftsResults.length > 0) {
+      const searchTime = Date.now() - startTime;
+      console.log(`📝 Text fallback (FTS): ${ftsResults.length} chunks found, time=${searchTime}ms`);
+      return ftsResults;
+    }
     
     // Clean query for LIKE search
     const cleanQuery = query.trim().toLowerCase();
@@ -285,12 +371,98 @@ export class ChunkService {
     textQuery += ` ORDER BY LENGTH(text) ASC LIMIT ?`;
     params.push(String(matchCount));
     
-    const result = sqlite.query<Chunk & { similarity: number }>(textQuery, params);
+    const result = sqlite.query<RankedChunk>(textQuery, params);
     const searchTime = Date.now() - startTime;
     
     console.log(`📝 Text fallback: ${result.rows.length} chunks found, time=${searchTime}ms`);
-    
-    return result.rows;
+    if (result.rows.length > 0) {
+      return result.rows;
+    }
+
+    const relaxedTerms = extractRelaxedSearchTerms(query);
+    if (relaxedTerms.length === 0) {
+      return [];
+    }
+
+    const scoreClauses = relaxedTerms.map(() => 'CASE WHEN LOWER(text) LIKE ? THEN 1 ELSE 0 END');
+    const scoreParams = relaxedTerms.map(term => `%${term}%`);
+    const relaxedParams = [...scoreParams];
+
+    let relaxedQuery = `
+      SELECT *,
+        (${scoreClauses.join(' + ')}) * 0.7 AS similarity
+      FROM chunks
+      WHERE (${scoreClauses.join(' + ')}) > 0
+    `;
+
+    if (nodeIds && nodeIds.length > 0) {
+      relaxedQuery += ` AND node_id IN (${nodeIds.map(() => '?').join(',')})`;
+      relaxedParams.push(...nodeIds.map(String));
+    }
+
+    relaxedQuery += ' ORDER BY similarity DESC, chunk_idx ASC LIMIT ?';
+    relaxedParams.push(String(matchCount));
+
+    const relaxedResult = sqlite.query<RankedChunk>(
+      relaxedQuery,
+      [...scoreParams, ...relaxedParams]
+    );
+    const relaxedSearchTime = Date.now() - startTime;
+    console.log(`📝 Text fallback (relaxed): ${relaxedResult.rows.length} chunks found, time=${relaxedSearchTime}ms`);
+
+    return relaxedResult.rows;
+  }
+
+  private ftsSearchChunks(
+    sqlite: ReturnType<typeof getSQLiteClient>,
+    query: string,
+    matchCount: number,
+    nodeIds?: number[]
+  ): RankedChunk[] {
+    const ftsExists = sqlite.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks_fts'"
+    ).get();
+    if (!ftsExists) return [];
+
+    const ftsQuery = sanitizeFtsQuery(query);
+    if (!ftsQuery) return [];
+
+    try {
+      if (nodeIds && nodeIds.length > 0) {
+        const result = sqlite.query<RankedChunk>(`
+          SELECT c.*, 0.85 as similarity
+          FROM chunks c
+          WHERE c.node_id IN (${nodeIds.map(() => '?').join(',')})
+          AND c.id IN (
+            SELECT rowid
+            FROM chunks_fts
+            WHERE chunks_fts MATCH ?
+          )
+          ORDER BY c.chunk_idx ASC
+          LIMIT ?
+        `, [...nodeIds, ftsQuery, matchCount]);
+
+        return result.rows;
+      }
+
+      const result = sqlite.query<RankedChunk>(`
+        WITH fts_matches AS (
+          SELECT rowid, rank
+          FROM chunks_fts
+          WHERE chunks_fts MATCH ?
+          LIMIT ?
+        )
+        SELECT c.*, 0.85 as similarity
+        FROM fts_matches fm
+        JOIN chunks c ON c.id = fm.rowid
+        ORDER BY fm.rank
+      `, [ftsQuery, matchCount]);
+
+      return result.rows;
+    } catch (error) {
+      console.warn('[ChunkSearch] FTS chunk search failed, falling back to LIKE:', error);
+      return [];
+    }
   }
 
   async getChunkCount(): Promise<number> {

@@ -3,6 +3,15 @@ import { z } from 'zod';
 import { edgeService } from '@/services/database/edges';
 import { formatNodeForChat } from '../infrastructure/nodeFormatter';
 
+function truncateText(value: unknown, maxLength = 180): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.length <= maxLength) return trimmed;
+  if (maxLength <= 3) return trimmed.slice(0, maxLength);
+  return `${trimmed.slice(0, maxLength - 3)}...`;
+}
+
 export const queryEdgeTool = tool({
   description: 'Find edges by node/direction/source/ID',
   inputSchema: z.object({
@@ -38,6 +47,7 @@ export const queryEdgeTool = tool({
 
       // Handle node connections (most common use case)
       if (filters.node_id) {
+        const effectiveLimit = Math.min(filters.limit || 20, 12);
         const connections = await edgeService.getNodeConnections(filters.node_id);
         const edges = connections.map(conn => conn.edge);
         
@@ -48,33 +58,60 @@ export const queryEdgeTool = tool({
         }
         
         // Apply limit and format connected nodes
-        const limitedConnections = connections.slice(0, filters.limit || 20);
+        const limitedConnections = connections.slice(0, effectiveLimit);
         const formattedConnections = limitedConnections.map(connection => {
           const formattedNode = formatNodeForChat({
             id: connection.connected_node.id,
             title: connection.connected_node.title,
             dimensions: connection.connected_node.dimensions || []
           });
+
+          const context = connection.edge.context as Record<string, unknown> | undefined;
           
           return {
-            ...connection,
+            edge: {
+              id: connection.edge.id,
+              from_node_id: connection.edge.from_node_id,
+              to_node_id: connection.edge.to_node_id,
+              source: connection.edge.source,
+              created_at: connection.edge.created_at,
+              context: {
+                type: typeof context?.type === 'string' ? context.type : null,
+                explanation: truncateText(context?.explanation),
+                confidence: typeof context?.confidence === 'number' ? context.confidence : null,
+              }
+            },
             connected_node: {
-              ...connection.connected_node,
+              id: connection.connected_node.id,
+              title: connection.connected_node.title,
+              description: truncateText(connection.connected_node.description, 140),
+              dimensions: connection.connected_node.dimensions || [],
               formatted_display: formattedNode
             }
           };
         });
+
+        const summarizedEdges = formattedConnections.map(connection => ({
+          id: connection.edge.id,
+          from_node_id: connection.edge.from_node_id,
+          to_node_id: connection.edge.to_node_id,
+          source: connection.edge.source,
+          created_at: connection.edge.created_at,
+          context: connection.edge.context,
+          connected_node: connection.connected_node.formatted_display,
+        }));
         
         // Create message with formatted connected nodes
         const connectedNodeLabels = formattedConnections.map(conn => conn.connected_node.formatted_display).join(', ');
-        const message = `Found ${filteredEdges.length} edges for node ${filters.node_id}${connectedNodeLabels ? `. Connected nodes: ${connectedNodeLabels}` : ''}`;
+        const message = `Found ${filteredEdges.length} edges for node ${filters.node_id}. Showing ${formattedConnections.length}${connectedNodeLabels ? `. Connected nodes: ${connectedNodeLabels}` : ''}`;
 
         return {
           success: true,
           data: {
-            edges: filteredEdges.slice(0, filters.limit || 20),
+            edges: summarizedEdges,
             connections: formattedConnections,
             count: filteredEdges.length,
+            returned_count: formattedConnections.length,
             filters_applied: filters
           },
           message: message

@@ -34,6 +34,16 @@ type EvalChatLog = {
   workflowKey?: string | null;
   workflowNodeId?: number | null;
   latencyMs?: number;
+  firstChunkLatencyMs?: number | null;
+  firstTokenLatencyMs?: number | null;
+  promptBuildMs?: number | null;
+  toolsBuildMs?: number | null;
+  modelResolveMs?: number | null;
+  messageAssemblyMs?: number | null;
+  streamSetupMs?: number | null;
+  toolLoopMs?: number | null;
+  toolsUsed?: string[] | null;
+  toolCallsCount?: number | null;
   success?: boolean;
   error?: string | null;
 };
@@ -99,6 +109,16 @@ function ensureSchema(db: Database.Database) {
       workflow_key TEXT,
       workflow_node_id INTEGER,
       latency_ms INTEGER,
+      first_chunk_latency_ms INTEGER,
+      first_token_latency_ms INTEGER,
+      prompt_build_ms INTEGER,
+      tools_build_ms INTEGER,
+      model_resolve_ms INTEGER,
+      message_assembly_ms INTEGER,
+      stream_setup_ms INTEGER,
+      tool_loop_ms INTEGER,
+      tools_used_json TEXT,
+      tool_calls_count INTEGER,
       success INTEGER,
       error TEXT,
       dataset_id TEXT,
@@ -139,6 +159,36 @@ function ensureSchema(db: Database.Database) {
   }
   if (!columnNames.has('workflow_node_id')) {
     db.exec(`ALTER TABLE llm_chats ADD COLUMN workflow_node_id INTEGER;`);
+  }
+  if (!columnNames.has('first_chunk_latency_ms')) {
+    db.exec(`ALTER TABLE llm_chats ADD COLUMN first_chunk_latency_ms INTEGER;`);
+  }
+  if (!columnNames.has('first_token_latency_ms')) {
+    db.exec(`ALTER TABLE llm_chats ADD COLUMN first_token_latency_ms INTEGER;`);
+  }
+  if (!columnNames.has('prompt_build_ms')) {
+    db.exec(`ALTER TABLE llm_chats ADD COLUMN prompt_build_ms INTEGER;`);
+  }
+  if (!columnNames.has('tools_build_ms')) {
+    db.exec(`ALTER TABLE llm_chats ADD COLUMN tools_build_ms INTEGER;`);
+  }
+  if (!columnNames.has('model_resolve_ms')) {
+    db.exec(`ALTER TABLE llm_chats ADD COLUMN model_resolve_ms INTEGER;`);
+  }
+  if (!columnNames.has('message_assembly_ms')) {
+    db.exec(`ALTER TABLE llm_chats ADD COLUMN message_assembly_ms INTEGER;`);
+  }
+  if (!columnNames.has('stream_setup_ms')) {
+    db.exec(`ALTER TABLE llm_chats ADD COLUMN stream_setup_ms INTEGER;`);
+  }
+  if (!columnNames.has('tool_loop_ms')) {
+    db.exec(`ALTER TABLE llm_chats ADD COLUMN tool_loop_ms INTEGER;`);
+  }
+  if (!columnNames.has('tools_used_json')) {
+    db.exec(`ALTER TABLE llm_chats ADD COLUMN tools_used_json TEXT;`);
+  }
+  if (!columnNames.has('tool_calls_count')) {
+    db.exec(`ALTER TABLE llm_chats ADD COLUMN tool_calls_count INTEGER;`);
   }
 }
 
@@ -236,8 +286,11 @@ export function logEvalChat(entry: EvalChatLog) {
       user_message, assistant_message, input_tokens, output_tokens, total_tokens,
       cache_write_tokens, cache_read_tokens, cache_hit, cache_savings_pct,
       estimated_cost_usd, provider, mode, workflow_key, workflow_node_id,
-      latency_ms, success, error, dataset_id, scenario_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      latency_ms, first_chunk_latency_ms, first_token_latency_ms,
+      prompt_build_ms, tools_build_ms, model_resolve_ms, message_assembly_ms,
+      stream_setup_ms, tool_loop_ms, tools_used_json, tool_calls_count,
+      success, error, dataset_id, scenario_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     now,
     traceId,
@@ -261,6 +314,16 @@ export function logEvalChat(entry: EvalChatLog) {
     entry.workflowKey ?? null,
     entry.workflowNodeId ?? null,
     entry.latencyMs ?? null,
+    entry.firstChunkLatencyMs ?? null,
+    entry.firstTokenLatencyMs ?? null,
+    entry.promptBuildMs ?? null,
+    entry.toolsBuildMs ?? null,
+    entry.modelResolveMs ?? null,
+    entry.messageAssemblyMs ?? null,
+    entry.streamSetupMs ?? null,
+    entry.toolLoopMs ?? null,
+    stringifySafe(entry.toolsUsed ?? null),
+    entry.toolCallsCount ?? null,
     typeof entry.success === 'boolean' ? (entry.success ? 1 : 0) : null,
     entry.error ?? null,
     datasetId,

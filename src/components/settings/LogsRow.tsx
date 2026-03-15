@@ -8,6 +8,29 @@ interface LogsRowProps {
   isEven: boolean;
 }
 
+interface SnapshotMetrics {
+  thread?: string;
+  trace_id?: string;
+  input_tokens?: number;
+  output_tokens?: number;
+  cost_usd?: number;
+  cache_hit?: number;
+  latency_ms?: number;
+  first_token_latency_ms?: number;
+  first_chunk_latency_ms?: number;
+  prompt_build_ms?: number;
+  tools_build_ms?: number;
+  model_resolve_ms?: number;
+  message_assembly_ms?: number;
+  stream_setup_ms?: number;
+  tool_loop_ms?: number;
+  tools_count?: number;
+  tools_used?: string[];
+  tool_timings?: Array<{ toolName?: string; durationMs?: number }>;
+  model?: string;
+  system_message?: string;
+}
+
 export default function LogsRow({ log, isEven }: LogsRowProps) {
   const [expanded, setExpanded] = useState(false);
 
@@ -34,7 +57,7 @@ export default function LogsRow({ log, isEven }: LogsRowProps) {
       .replace(/: (true|false|null)/g, ': <span style="color: #a78bfa">$1</span>');
   };
 
-  const getMetricsFromSnapshot = () => {
+  const getMetricsFromSnapshot = (): SnapshotMetrics | null => {
     if (!log.snapshot_json || log.table_name !== 'chats') return null;
     try {
       const snapshot = JSON.parse(log.snapshot_json);
@@ -45,6 +68,18 @@ export default function LogsRow({ log, isEven }: LogsRowProps) {
         output_tokens: snapshot.output_tokens,
         cost_usd: snapshot.cost_usd,
         cache_hit: snapshot.cache_hit,
+        latency_ms: snapshot.latency_ms,
+        first_token_latency_ms: snapshot.first_token_latency_ms,
+        first_chunk_latency_ms: snapshot.first_chunk_latency_ms,
+        prompt_build_ms: snapshot.prompt_build_ms,
+        tools_build_ms: snapshot.tools_build_ms,
+        model_resolve_ms: snapshot.model_resolve_ms,
+        message_assembly_ms: snapshot.message_assembly_ms,
+        stream_setup_ms: snapshot.stream_setup_ms,
+        tool_loop_ms: snapshot.tool_loop_ms,
+        tools_count: snapshot.tools_count,
+        tools_used: snapshot.tools_used,
+        tool_timings: snapshot.tool_timings,
         model: snapshot.model,
         system_message: snapshot.system_message
       };
@@ -54,6 +89,7 @@ export default function LogsRow({ log, isEven }: LogsRowProps) {
   };
 
   const metrics = getMetricsFromSnapshot();
+  const metricsSafe: SnapshotMetrics = metrics ?? {};
 
   return (
     <>
@@ -102,6 +138,26 @@ export default function LogsRow({ log, isEven }: LogsRowProps) {
                   📊 {metrics.input_tokens}↓ {metrics.output_tokens}↑
                 </span>
               )}
+              {metrics.latency_ms !== undefined && metrics.latency_ms > 0 && (
+                <span>
+                  ⏱ {metrics.latency_ms}ms
+                </span>
+              )}
+              {metrics.first_token_latency_ms !== undefined && metrics.first_token_latency_ms > 0 && (
+                <span>
+                  ⚡ {metrics.first_token_latency_ms}ms first
+                </span>
+              )}
+              {metrics.first_chunk_latency_ms !== undefined && metrics.first_chunk_latency_ms > 0 && (
+                <span>
+                  ⌁ {metrics.first_chunk_latency_ms}ms chunk
+                </span>
+              )}
+              {metrics.tools_count !== undefined && metrics.tools_count > 0 && (
+                <span>
+                  🛠 {metrics.tools_count} tools
+                </span>
+              )}
               {metrics.cache_hit !== undefined && metrics.cache_hit === 1 && (
                 <span style={{ color: '#60a5fa' }}>
                   ⚡ Cache Hit
@@ -144,6 +200,52 @@ export default function LogsRow({ log, isEven }: LogsRowProps) {
               </div>
             )}
             <div style={{ marginBottom: '12px' }}>
+              {((metrics?.prompt_build_ms ?? 0) > 0 ||
+                (metrics?.tools_build_ms ?? 0) > 0 ||
+                (metrics?.model_resolve_ms ?? 0) > 0 ||
+                (metrics?.message_assembly_ms ?? 0) > 0 ||
+                (metrics?.stream_setup_ms ?? 0) > 0 ||
+                (metrics?.tool_loop_ms ?? 0) > 0) && (
+                <div style={{ marginBottom: '16px' }}>
+                  <div style={{ fontSize: '11px', color: '#888', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                    Latency Breakdown
+                  </div>
+                  <div style={{ fontSize: '11px', color: '#ccc', display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                    {(metricsSafe.prompt_build_ms ?? 0) > 0 && <span>prompt {metricsSafe.prompt_build_ms}ms</span>}
+                    {(metricsSafe.tools_build_ms ?? 0) > 0 && <span>tools {metricsSafe.tools_build_ms}ms</span>}
+                    {(metricsSafe.model_resolve_ms ?? 0) > 0 && <span>model {metricsSafe.model_resolve_ms}ms</span>}
+                    {(metricsSafe.message_assembly_ms ?? 0) > 0 && <span>messages {metricsSafe.message_assembly_ms}ms</span>}
+                    {(metricsSafe.stream_setup_ms ?? 0) > 0 && <span>stream {metricsSafe.stream_setup_ms}ms</span>}
+                    {(metricsSafe.tool_loop_ms ?? 0) > 0 && <span>tool-loop {metricsSafe.tool_loop_ms}ms</span>}
+                    {(metricsSafe.first_chunk_latency_ms ?? 0) > 0 && <span>first-chunk {metricsSafe.first_chunk_latency_ms}ms</span>}
+                    {(metricsSafe.first_token_latency_ms ?? 0) > 0 && <span>first-token {metricsSafe.first_token_latency_ms}ms</span>}
+                  </div>
+                </div>
+              )}
+              {Array.isArray(metrics?.tool_timings) && metrics.tool_timings.length > 0 && (
+                <div style={{ marginBottom: '16px' }}>
+                  <div style={{ fontSize: '11px', color: '#888', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                    Tool Timings
+                  </div>
+                  <div style={{ fontSize: '11px', color: '#ccc', display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                    {metrics.tool_timings.map((tool: any, index: number) => (
+                      <span key={`${tool.toolName || 'tool'}-${index}`}>
+                        {tool.toolName || 'tool'} {tool.durationMs ?? 0}ms
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {Array.isArray(metrics?.tools_used) && metrics.tools_used.length > 0 && (
+                <div style={{ marginBottom: '16px' }}>
+                  <div style={{ fontSize: '11px', color: '#888', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                    Tools Used
+                  </div>
+                  <div style={{ fontSize: '11px', color: '#ccc' }}>
+                    {metrics.tools_used.join(', ')}
+                  </div>
+                </div>
+              )}
               <div style={{ fontSize: '11px', color: '#888', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
                 Snapshot JSON
               </div>

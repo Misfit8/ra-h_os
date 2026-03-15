@@ -5,11 +5,11 @@ import { formatNodeForChat } from '../infrastructure/nodeFormatter';
 import type { Node } from '@/types/database';
 
 export const queryNodesTool = tool({
-  description: 'Search nodes by title/notes/dimensions',
+  description: 'Search nodes across title, description, notes, and dimensions. Multi-word queries use FTS/tokenized fallback, and agent calls can add node-vector retrieval.',
   inputSchema: z.object({
     filters: z.object({
       dimensions: z.array(z.string()).describe('Filter by dimensions (e.g., ["research", "ai", "technology"]). Replaces old type/stage filtering.').optional(),
-      search: z.string().describe('Search term to match against title or notes').optional(),
+      search: z.string().describe('Search term to match against node title, description, or notes').optional(),
       limit: z.number().min(1).max(50).default(10).describe('Maximum number of results to return'),
       createdAfter: z.string().optional().describe('ISO date (YYYY-MM-DD). Only return nodes created on or after this date.'),
       createdBefore: z.string().optional().describe('ISO date (YYYY-MM-DD). Only return nodes created before this date.'),
@@ -73,6 +73,7 @@ export const queryNodesTool = tool({
         limit,
         dimensions: filters.dimensions,
         search: filters.search,
+        searchMode: searchTerm ? 'hybrid' : 'standard',
         createdAfter: filters.createdAfter,
         createdBefore: filters.createdBefore,
         eventAfter: filters.eventAfter,

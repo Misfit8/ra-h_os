@@ -1,6 +1,7 @@
 import { getSQLiteClient } from '@/services/database/sqlite-client';
 import { UsageData } from '@/types/analytics';
 import { RequestContext } from '@/services/context/requestContext';
+import { logEvalChat } from '@/services/evals/evalsLogger';
 
 interface ChatLogEntry {
   chat_type: string;
@@ -26,14 +27,64 @@ interface StreamMetadata {
   traceId?: string;
   parentChatId?: number;
   systemMessage?: string;
+  promptVersion?: string;
+  modelUsed?: string;
   workflowKey?: string;
   workflowNodeId?: number;
-  mode?: 'easy' | 'hard';
   toolCallsData?: any[];
   backendUsage?: Array<{
     provider: string;
     headers: Record<string, string>;
   }>;
+  requestStartedAt?: number;
+  timingBreakdown?: {
+    promptBuildMs?: number;
+    toolsBuildMs?: number;
+    modelResolveMs?: number;
+    messageAssemblyMs?: number;
+    streamSetupMs?: number;
+    toolLoopMs?: number;
+  };
+  toolTimingData?: Array<{
+    toolName: string;
+    durationMs: number;
+  }>;
+  latencyMs?: number;
+  firstTokenLatencyMs?: number | null;
+  firstChunkLatencyMs?: number | null;
+}
+
+function normalizeToolResult(result: unknown): unknown {
+  if (result == null) return null;
+  if (typeof result === 'object') return result;
+  return { value: result };
+}
+
+function collectToolCalls(result: any): any[] | undefined {
+  const collected: any[] = [];
+
+  const pushCall = (call: any) => {
+    if (!call?.toolName) return;
+    collected.push({
+      toolName: call.toolName,
+      args: call.args ?? null,
+      result: normalizeToolResult(call.result),
+    });
+  };
+
+  if (Array.isArray(result?.toolCalls)) {
+    result.toolCalls.forEach(pushCall);
+  }
+
+  if (Array.isArray(result?.steps)) {
+    result.steps.forEach((step: any) => {
+      if (Array.isArray(step?.toolCalls)) {
+        step.toolCalls.forEach(pushCall);
+      }
+    });
+  }
+
+  return collected.length > 0 ? collected : undefined;
 }
 
 export class ChatLoggingMiddleware {
@@ -94,7 +145,7 @@ export class ChatLoggingMiddleware {
         focused_node_id: metadata.activeTabId ?? null,
         helper_name: metadata.helperName,
         agent_type: metadata.agentType || 'orchestrator',
-        delegation_id: metadata.delegationId ?? null,
+        delegation_id: null,
         metadata: {
           timestamp: new Date().toISOString(),
           session_id: metadata.sessionId,
@@ -102,7 +153,6 @@ export class ChatLoggingMiddleware {
           open_tab_count: metadata.openTabs?.length || 0,
           has_focused_node: !!metadata.activeTabId,
           message_count: messages.length,
-          ...(metadata.mode && { mode: metadata.mode }),
           // System message
           ...(metadata.systemMessage && { system_message: metadata.systemMessage }),
           // Enhanced usage data
@@ -125,6 +175,14 @@ export class ChatLoggingMiddleware {
             validation_message: metadata.usageData.validationMessage,
             fallback_action: metadata.usageData.fallbackAction,
           }),
+          ...((metadata.toolCallsData && metadata.toolCallsData.length > 0) ? {
+            tools_used: metadata.usageData?.toolsUsed ?? Array.from(new Set(
+              metadata.toolCallsData
+                .map((call: any) => call?.toolName)
+                .filter((toolName: unknown): toolName is string => typeof toolName === 'string' && toolName.length > 0)
+            )),
+            tool_calls_count: metadata.usageData?.toolCallsCount ?? metadata.toolCallsData.length,
+          } : {}),
           // Tool calls data
           ...(metadata.toolCallsData && metadata.toolCallsData.length > 0 && {
             tool_calls: metadata.toolCallsData
@@ -132,16 +190,17 @@ export class ChatLoggingMiddleware {
           // Trace grouping
           ...(metadata.traceId && { trace_id: metadata.traceId }),
           ...(metadata.parentChatId && { parent_chat_id: metadata.parentChatId }),
-          // Workflow metadata
-          ...(metadata.workflowKey && {
-            workflow_key: metadata.workflowKey,
-            workflow_node_id: metadata.workflowNodeId,
-            is_workflow: true,
-          }),
           // Backend usage (for Supabase sync correlation)
           ...(metadata.backendUsage && metadata.backendUsage.length > 0 && {
             backend_usage: metadata.backendUsage,
           }),
+          ...(metadata.timingBreakdown && { timing_breakdown: metadata.timingBreakdown }),
+          ...(metadata.toolTimingData && metadata.toolTimingData.length > 0 && {
+            tool_timings: metadata.toolTimingData,
+          }),
+          ...(metadata.latencyMs !== undefined && { latency_ms: metadata.latencyMs }),
+          ...(metadata.firstTokenLatencyMs !== undefined && { first_token_latency_ms: metadata.firstTokenLatencyMs }),
+          ...(metadata.firstChunkLatencyMs !== undefined && { first_chunk_latency_ms: metadata.firstChunkLatencyMs }),
         }
       };
 
@@ -165,7 +224,7 @@ export class ChatLoggingMiddleware {
 
       const lastInsertedChatId = Number(result.lastInsertRowid);
 
-      if (metadata.agentType === 'orchestrator' && (metadata.helperName === 'ra-h' || metadata.helperName === 'ra-h-easy')) {
+      if (metadata.agentType === 'orchestrator' && metadata.helperName === 'ra-h') {
         RequestContext.set({ 
           traceId: metadata.traceId, 
           parentChatId: lastInsertedChatId 
@@ -180,20 +239,21 @@ export class ChatLoggingMiddleware {
   static createLoggingHandlers(metadata: StreamMetadata, messages: any[]) {
     let assistantResponse = '';
     const userMessage = this.extractUserMessage(messages);
+    const startedAt = metadata.requestStartedAt ?? Date.now();
+    const streamStartedAt = Date.now();
+    const streamSetupMs = Math.max(0, streamStartedAt - startedAt);
+    let firstTextDeltaAt: number | null = null;
+    let firstChunkAt: number | null = null;
 
     return {
       onFinish: async (result: any) => {
         const { text, toolCalls, steps } = result;
         // Log if we have a user message and either text OR tool activity
-        const hasActivity = text || toolCalls?.length > 0 || steps?.length > 0;
+        const hasActivity = Boolean(text || toolCalls?.length > 0 || steps?.length > 0);
         
         if (userMessage && hasActivity) {
           // Capture tool calls if present
-          const toolCallsData = toolCalls && toolCalls.length > 0 ? toolCalls.map((tc: any) => ({
-            toolName: tc.toolName,
-            args: tc.args,
-            result: typeof tc.result === 'object' ? tc.result : { value: tc.result }
-          })) : undefined;
+          const toolCallsData = collectToolCalls(result);
           
           if (toolCallsData) {
             console.log(`🔧 Captured ${toolCallsData.length} tool calls for logging`);
@@ -201,7 +261,16 @@ export class ChatLoggingMiddleware {
           
           const enhancedMetadata = { 
             ...metadata,
-            toolCallsData
+            toolCallsData,
+            timingBreakdown: {
+              ...metadata.timingBreakdown,
+              streamSetupMs,
+            },
+            latencyMs: Date.now() - startedAt,
+            firstChunkLatencyMs: firstChunkAt ? firstChunkAt - startedAt : null,
+            firstTokenLatencyMs: firstTextDeltaAt
+              ? firstTextDeltaAt - startedAt
+              : (firstChunkAt ? firstChunkAt - startedAt : null),
           };
           
           await this.logChatInteraction(
@@ -213,9 +282,73 @@ export class ChatLoggingMiddleware {
         } else if (userMessage && !hasActivity) {
           console.warn(`⚠️ Skipping chat log - no text or tool activity for user message: ${userMessage.substring(0, 50)}...`);
         }
+
+        const evalContext = RequestContext.get();
+        if (userMessage) {
+          const toolCallsData = collectToolCalls(result);
+          const timingBreakdown = {
+            ...metadata.timingBreakdown,
+            streamSetupMs,
+          };
+          const evalMetadata = {
+            ...metadata,
+            toolCallsData,
+            timingBreakdown,
+          };
+          logEvalChat({
+            traceId: evalMetadata.traceId,
+            spanId: evalContext.evalChatSpanId,
+            helperName: evalMetadata.helperName,
+            model: evalMetadata.modelUsed || evalMetadata.usageData?.modelUsed,
+            promptVersion: evalMetadata.promptVersion,
+            systemMessage: evalMetadata.systemMessage || null,
+            userMessage,
+            assistantMessage: text || assistantResponse || null,
+            inputTokens: evalMetadata.usageData?.inputTokens,
+            outputTokens: evalMetadata.usageData?.outputTokens,
+            totalTokens: evalMetadata.usageData?.totalTokens,
+            cacheWriteTokens: evalMetadata.usageData?.cacheWriteTokens,
+            cacheReadTokens: evalMetadata.usageData?.cacheReadTokens,
+            cacheHit: evalMetadata.usageData?.cacheHit,
+            cacheSavingsPct: evalMetadata.usageData?.cacheSavingsPct,
+            estimatedCostUsd: evalMetadata.usageData?.estimatedCostUsd,
+            provider: evalMetadata.usageData?.provider ?? null,
+            workflowKey: evalMetadata.workflowKey ?? null,
+            workflowNodeId: evalMetadata.workflowNodeId ?? null,
+            latencyMs: Date.now() - startedAt,
+            firstChunkLatencyMs: firstChunkAt ? firstChunkAt - startedAt : null,
+            firstTokenLatencyMs: firstTextDeltaAt
+              ? firstTextDeltaAt - startedAt
+              : (firstChunkAt ? firstChunkAt - startedAt : null),
+            promptBuildMs: timingBreakdown?.promptBuildMs ?? null,
+            toolsBuildMs: timingBreakdown?.toolsBuildMs ?? null,
+            modelResolveMs: timingBreakdown?.modelResolveMs ?? null,
+            messageAssemblyMs: timingBreakdown?.messageAssemblyMs ?? null,
+            streamSetupMs,
+            toolLoopMs: timingBreakdown?.toolLoopMs ?? null,
+            toolsUsed: evalMetadata.usageData?.toolsUsed ?? (
+              evalMetadata.toolCallsData
+                ? Array.from(new Set(
+                    evalMetadata.toolCallsData
+                      .map((call: any) => call?.toolName)
+                      .filter((toolName: unknown): toolName is string => typeof toolName === 'string' && toolName.length > 0)
+                  ))
+                : null
+            ),
+            toolCallsCount: evalMetadata.usageData?.toolCallsCount ?? evalMetadata.toolCallsData?.length ?? null,
+            success: hasActivity,
+            error: null,
+          });
+        }
       },
       onChunk: ({ chunk }: { chunk: any }) => {
+        if (firstChunkAt === null) {
+          firstChunkAt = Date.now();
+        }
         if (chunk.type === 'text-delta' && chunk.textDelta) {
+          if (firstTextDeltaAt === null) {
+            firstTextDeltaAt = Date.now();
+          }
           assistantResponse += chunk.textDelta;
         }
       }
