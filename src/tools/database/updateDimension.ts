@@ -1,22 +1,22 @@
 import { tool } from 'ai';
 import { z } from 'zod';
+import { getInternalApiBaseUrl } from '@/services/runtime/apiBase';
 
 export const updateDimensionTool = tool({
-  description: 'Update dimension name, description, or lock status',
+  description: 'Update a dimension name or description.',
   inputSchema: z.object({
     currentName: z.string().describe('Current dimension name'),
     newName: z.string().optional().describe('New dimension name (if renaming)'),
-    description: z.string().max(500).optional().describe('New description (max 500 characters)'),
-    isPriority: z.boolean().optional().describe('Lock/unlock status (true = locked, false = unlocked)')
+    description: z.string().max(500).optional().describe('New description (max 500 characters)')
   }),
   execute: async (params) => {
     console.log('📝 UpdateDimension tool called with params:', JSON.stringify(params, null, 2));
     try {
       // Validate at least one update field
-      if (!params.newName && params.description === undefined && params.isPriority === undefined) {
+      if (!params.newName && params.description === undefined) {
         return {
           success: false,
-          error: 'At least one update field (newName, description, or isPriority) must be provided',
+          error: 'At least one update field (newName or description) must be provided',
           data: null
         };
       }
@@ -31,11 +31,7 @@ export const updateDimensionTool = tool({
         body.newName = params.newName.trim();
       }
 
-      if (params.isPriority !== undefined) {
-        body.isPriority = params.isPriority;
-      }
-
-      const response = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/api/dimensions`, {
+      const response = await fetch(`${getInternalApiBaseUrl()}/api/dimensions`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
@@ -62,7 +58,6 @@ export const updateDimensionTool = tool({
       const updates = [];
       if (params.newName) updates.push(`renamed to "${params.newName}"`);
       if (params.description !== undefined) updates.push('description updated');
-      if (params.isPriority !== undefined) updates.push(params.isPriority ? 'locked' : 'unlocked');
 
       return {
         success: true,
@@ -78,4 +73,3 @@ export const updateDimensionTool = tool({
     }
   }
 });
-

@@ -67,6 +67,7 @@ export interface EdgeContext {
 export interface NodeFilters {
   dimensions?: string[];      // Filter by dimensions (replaces stage/type filtering)
   search?: string;           // Text search in title/content
+  searchMode?: 'standard' | 'hybrid'; // standard = FTS/LIKE, hybrid = add node-vector retrieval
   limit?: number;
   offset?: number;
   sortBy?: 'updated' | 'edges' | 'created' | 'event_date';  // Sort by updated_at, edge count, created_at, or event_date

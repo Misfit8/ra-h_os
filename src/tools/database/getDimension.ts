@@ -4,7 +4,7 @@ import { DimensionService } from '@/services/database/dimensionService';
 import { getSQLiteClient } from '@/services/database/sqlite-client';
 
 export const getDimensionTool = tool({
-  description: 'Get detailed information about a specific dimension by name, including its description, priority status, and node count.',
+  description: 'Get dimension details: description and node count.',
   inputSchema: z.object({
     name: z.string().describe('The exact name of the dimension to retrieve')
   }),
@@ -43,7 +43,6 @@ export const getDimensionTool = tool({
             data: {
               name: trimmedName,
               description: null,
-              isPriority: false,
               nodeCount,
               exists: true,
               hasMetadata: false
@@ -62,7 +61,6 @@ export const getDimensionTool = tool({
       const result = {
         name: dimension.name,
         description: dimension.description,
-        isPriority: dimension.is_priority,
         nodeCount,
         updatedAt: dimension.updated_at,
         exists: true,
@@ -72,7 +70,6 @@ export const getDimensionTool = tool({
       // Build descriptive message
       const parts: string[] = [];
       parts.push(`Dimension: ${result.name}`);
-      if (result.isPriority) parts.push('Status: 🔒 Priority (locked)');
       parts.push(`Nodes: ${result.nodeCount}`);
       if (result.description) parts.push(`Description: ${result.description}`);
       parts.push(`Last updated: ${result.updatedAt}`);

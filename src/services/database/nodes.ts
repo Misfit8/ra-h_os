@@ -1,6 +1,44 @@
 import { getSQLiteClient } from './sqlite-client';
 import { Node, NodeFilters } from '@/types/database';
 import { eventBroadcaster } from '../events';
+import { EmbeddingService } from '@/services/embeddings';
+
+type NodeRow = Node & { dimensions_json: string };
+type NodeSearchRow = NodeRow & { rank?: number; similarity?: number };
+
+function sanitizeFtsQuery(input: string): string {
+  return input
+    .replace(/['"()*:^~{}[\]]/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(word => word.length > 0 && !/^(AND|OR|NOT|NEAR)$/i.test(word))
+    .join(' ');
+}
+
+function reciprocalRankFuse<T extends { id: number }>(
+  rankedLists: T[][],
+  limit: number,
+): T[] {
+  const scores = new Map<number, { score: number; item: T }>();
+  const k = 60;
+
+  rankedLists.forEach((list) => {
+    list.forEach((item, index) => {
+      const existing = scores.get(item.id);
+      const score = 1 / (k + index + 1);
+      if (existing) {
+        existing.score += score;
+      } else {
+        scores.set(item.id, { score, item });
+      }
+    });
+  });
+
+  return Array.from(scores.values())
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map(entry => entry.item);
+}
 
 export class NodeService {
   async getNodes(filters: NodeFilters = {}): Promise<Node[]> {
@@ -10,6 +48,11 @@ export class NodeService {
   async countNodes(filters: NodeFilters = {}): Promise<number> {
     const { dimensions, search, dimensionsMatch = 'any',
             createdAfter, createdBefore, eventAfter, eventBefore } = filters;
+
+    if (search?.trim()) {
+      return this.countSearchNodesSQLite(filters);
+    }
+
     const sqlite = getSQLiteClient();
 
     let query = `SELECT COUNT(*) as total FROM nodes n WHERE 1=1`;
@@ -52,6 +95,11 @@ export class NodeService {
   private async getNodesSQLite(filters: NodeFilters = {}): Promise<Node[]> {
     const { dimensions, search, limit = 100, offset = 0, sortBy, dimensionsMatch = 'any',
             createdAfter, createdBefore, eventAfter, eventBefore } = filters;
+
+    if (search?.trim()) {
+      return this.searchNodesSQLite(filters);
+    }
+
     const sqlite = getSQLiteClient();
     
     // Use nodes_v view for array-like dimensions behavior (exclude embedding BLOB for performance)
@@ -135,6 +183,7 @@ export class NodeService {
     } else if (sortBy === 'created') {
       query += ' ORDER BY n.created_at DESC';
     } else if (sortBy === 'event_date') {
+      // Nodes with event_date first (DESC), then by updated_at for nulls
       query += ' ORDER BY n.event_date IS NULL, n.event_date DESC, n.updated_at DESC';
     } else {
       query += ' ORDER BY n.updated_at DESC';
@@ -150,14 +199,10 @@ export class NodeService {
       params.push(offset);
     }
 
-    const result = sqlite.query<Node & { dimensions_json: string }>(query, params);
+    const result = sqlite.query<NodeRow>(query, params);
     
     // Parse dimensions_json and metadata back for compatibility
-    return result.rows.map(row => ({
-      ...row,
-      dimensions: JSON.parse(row.dimensions_json || '[]'),
-      metadata: row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : null,
-    }));
+    return result.rows.map(row => this.mapNodeRow(row));
   }
 
   async getNodeById(id: number): Promise<Node | null> {
@@ -177,16 +222,12 @@ export class NodeService {
       FROM nodes n
       WHERE n.id = ?
     `;
-    const result = sqlite.query<Node & { dimensions_json: string }>(query, [id]);
+    const result = sqlite.query<NodeRow>(query, [id]);
     
     if (result.rows.length === 0) return null;
     
     const row = result.rows[0];
-    return {
-      ...row,
-      dimensions: JSON.parse(row.dimensions_json || '[]'),
-      metadata: row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : null,
-    };
+    return this.mapNodeRow(row);
   }
 
   async createNode(nodeData: Partial<Node>): Promise<Node> {
@@ -361,6 +402,264 @@ export class NodeService {
 
   async searchNodes(searchTerm: string, limit = 50): Promise<Node[]> {
     return this.getNodes({ search: searchTerm, limit });
+  }
+
+  private mapNodeRow(row: NodeRow): Node {
+    return {
+      ...row,
+      dimensions: JSON.parse(row.dimensions_json || '[]'),
+      metadata: row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : null,
+    };
+  }
+
+  private buildNodeFilterClauses(filters: NodeFilters, alias = 'n'): { clauses: string[]; params: any[] } {
+    const {
+      dimensions,
+      dimensionsMatch = 'any',
+      createdAfter,
+      createdBefore,
+      eventAfter,
+      eventBefore,
+    } = filters;
+
+    const clauses: string[] = [];
+    const params: any[] = [];
+
+    if (dimensions && dimensions.length > 0) {
+      if (dimensionsMatch === 'all' && dimensions.length > 1) {
+        clauses.push(`(
+          SELECT COUNT(DISTINCT nd.dimension) FROM node_dimensions nd
+          WHERE nd.node_id = ${alias}.id
+          AND nd.dimension IN (${dimensions.map(() => '?').join(',')})
+        ) = ?`);
+        params.push(...dimensions, dimensions.length);
+      } else {
+        clauses.push(`EXISTS (
+          SELECT 1 FROM node_dimensions nd
+          WHERE nd.node_id = ${alias}.id
+          AND nd.dimension IN (${dimensions.map(() => '?').join(',')})
+        )`);
+        params.push(...dimensions);
+      }
+    }
+
+    if (createdAfter) { clauses.push(`${alias}.created_at >= ?`); params.push(createdAfter); }
+    if (createdBefore) { clauses.push(`${alias}.created_at < ?`); params.push(createdBefore); }
+    if (eventAfter) { clauses.push(`${alias}.event_date >= ?`); params.push(eventAfter); }
+    if (eventBefore) { clauses.push(`${alias}.event_date < ?`); params.push(eventBefore); }
+
+    return { clauses, params };
+  }
+
+  private async searchNodesSQLite(filters: NodeFilters): Promise<Node[]> {
+    const sqlite = getSQLiteClient();
+    const search = filters.search?.trim();
+    const limit = Math.min(Math.max(filters.limit ?? 100, 1), 100);
+    const offset = Math.max(filters.offset ?? 0, 0);
+
+    if (!search) {
+      return [];
+    }
+
+    const searchLimit = Math.max(limit + offset, Math.min(limit * 5, 100));
+    let rankedRows = this.searchNodesFts(sqlite, search, filters, searchLimit);
+
+    if (rankedRows.length === 0) {
+      rankedRows = this.searchNodesLike(sqlite, search, filters, searchLimit);
+    }
+
+    if ((filters.searchMode ?? 'standard') === 'hybrid') {
+      const vectorRows = await this.searchNodesVector(sqlite, search, filters, searchLimit);
+      if (vectorRows.length > 0) {
+        rankedRows = reciprocalRankFuse<NodeSearchRow>([rankedRows, vectorRows], searchLimit);
+      }
+    }
+
+    return rankedRows
+      .slice(offset, offset + limit)
+      .map(row => this.mapNodeRow(row));
+  }
+
+  private countSearchNodesSQLite(filters: NodeFilters): number {
+    const sqlite = getSQLiteClient();
+    const search = filters.search?.trim();
+    if (!search) return 0;
+
+    const ftsQuery = sanitizeFtsQuery(search);
+    const ftsExists = sqlite.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nodes_fts'"
+    ).get();
+    const { clauses, params } = this.buildNodeFilterClauses(filters);
+
+    if (ftsExists && ftsQuery) {
+      const whereClauses = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+      const result = sqlite.query<{ total: number }>(`
+        WITH matched_nodes AS (
+          SELECT rowid
+          FROM nodes_fts
+          WHERE nodes_fts MATCH ?
+        )
+        SELECT COUNT(*) as total
+        FROM matched_nodes mn
+        JOIN nodes n ON n.id = mn.rowid
+        ${whereClauses}
+      `, [ftsQuery, ...params]);
+
+      return Number(result.rows[0]?.total ?? 0);
+    }
+
+    const words = search.split(/\s+/).filter(Boolean);
+    let query = `SELECT COUNT(*) as total FROM nodes n WHERE 1=1`;
+    const queryParams = [...params];
+
+    if (clauses.length > 0) {
+      query += ` AND ${clauses.join(' AND ')}`;
+    }
+
+    for (const word of words) {
+      query += ` AND (n.title LIKE ? COLLATE NOCASE OR n.description LIKE ? COLLATE NOCASE OR n.notes LIKE ? COLLATE NOCASE)`;
+      queryParams.push(`%${word}%`, `%${word}%`, `%${word}%`);
+    }
+
+    const result = sqlite.query<{ total: number }>(query, queryParams);
+    return Number(result.rows[0]?.total ?? 0);
+  }
+
+  private searchNodesFts(
+    sqlite: ReturnType<typeof getSQLiteClient>,
+    search: string,
+    filters: NodeFilters,
+    limit: number,
+  ): NodeSearchRow[] {
+    const ftsQuery = sanitizeFtsQuery(search);
+    if (!ftsQuery) return [];
+
+    const ftsExists = sqlite.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nodes_fts'"
+    ).get();
+    if (!ftsExists) return [];
+
+    const { clauses, params } = this.buildNodeFilterClauses(filters);
+    const whereClauses = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+
+    try {
+      const result = sqlite.query<NodeSearchRow>(`
+        WITH fts_matches AS (
+          SELECT rowid, rank
+          FROM nodes_fts
+          WHERE nodes_fts MATCH ?
+          LIMIT ?
+        )
+        SELECT n.id, n.title, n.description, n.notes, n.link, n.event_date, n.metadata, n.chunk,
+               n.chunk_status, n.embedding_updated_at, n.embedding_text,
+               n.created_at, n.updated_at,
+               COALESCE((SELECT JSON_GROUP_ARRAY(d.dimension)
+                         FROM node_dimensions d WHERE d.node_id = n.id), '[]') as dimensions_json,
+               fm.rank
+        FROM fts_matches fm
+        JOIN nodes n ON n.id = fm.rowid
+        ${whereClauses}
+        ORDER BY fm.rank
+        LIMIT ?
+      `, [ftsQuery, Math.max(limit * 2, 50), ...params, limit]);
+
+      return result.rows;
+    } catch (error) {
+      console.warn('[NodeSearch] FTS search failed, falling back to LIKE:', error);
+      return [];
+    }
+  }
+
+  private searchNodesLike(
+    sqlite: ReturnType<typeof getSQLiteClient>,
+    search: string,
+    filters: NodeFilters,
+    limit: number,
+  ): NodeSearchRow[] {
+    const words = search.split(/\s+/).filter(Boolean);
+    const { clauses, params } = this.buildNodeFilterClauses(filters);
+    let query = `
+      SELECT n.id, n.title, n.description, n.notes, n.link, n.event_date, n.metadata, n.chunk,
+             n.chunk_status, n.embedding_updated_at, n.embedding_text,
+             n.created_at, n.updated_at,
+             COALESCE((SELECT JSON_GROUP_ARRAY(d.dimension)
+                       FROM node_dimensions d WHERE d.node_id = n.id), '[]') as dimensions_json
+      FROM nodes n
+      WHERE 1=1
+    `;
+    const queryParams = [...params];
+
+    if (clauses.length > 0) {
+      query += ` AND ${clauses.join(' AND ')}`;
+    }
+
+    for (const word of words) {
+      query += ` AND (n.title LIKE ? COLLATE NOCASE OR n.description LIKE ? COLLATE NOCASE OR n.notes LIKE ? COLLATE NOCASE)`;
+      queryParams.push(`%${word}%`, `%${word}%`, `%${word}%`);
+    }
+
+    query += ` ORDER BY
+      CASE WHEN LOWER(n.title) = LOWER(?) THEN 1 ELSE 6 END,
+      CASE WHEN LOWER(n.title) LIKE LOWER(?) THEN 2 ELSE 6 END,
+      CASE WHEN n.title LIKE ? COLLATE NOCASE THEN 3 ELSE 6 END,
+      CASE WHEN n.description LIKE ? COLLATE NOCASE THEN 4 ELSE 6 END,
+      CASE WHEN n.notes LIKE ? COLLATE NOCASE THEN 5 ELSE 6 END,
+      n.updated_at DESC
+      LIMIT ?`;
+
+    queryParams.push(search, `${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, limit);
+
+    const result = sqlite.query<NodeSearchRow>(query, queryParams);
+    return result.rows;
+  }
+
+  private async searchNodesVector(
+    sqlite: ReturnType<typeof getSQLiteClient>,
+    search: string,
+    filters: NodeFilters,
+    limit: number,
+  ): Promise<NodeSearchRow[]> {
+    try {
+      const embedding = await EmbeddingService.generateQueryEmbedding(search);
+      if (!EmbeddingService.validateEmbedding(embedding)) {
+        return [];
+      }
+
+      const vecExists = sqlite.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='vec_nodes'"
+      ).get();
+      if (!vecExists) return [];
+
+      const vectorString = `[${embedding.join(',')}]`;
+      const { clauses, params } = this.buildNodeFilterClauses(filters);
+      const whereClauses = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+
+      const result = sqlite.query<NodeSearchRow>(`
+        WITH vector_matches AS (
+          SELECT node_id, distance
+          FROM vec_nodes
+          WHERE embedding MATCH ?
+          ORDER BY distance
+          LIMIT ?
+        )
+        SELECT n.id, n.title, n.description, n.notes, n.link, n.event_date, n.metadata, n.chunk,
+               n.chunk_status, n.embedding_updated_at, n.embedding_text,
+               n.created_at, n.updated_at,
+               COALESCE((SELECT JSON_GROUP_ARRAY(d.dimension)
+                         FROM node_dimensions d WHERE d.node_id = n.id), '[]') as dimensions_json,
+               (1.0 / (1.0 + vm.distance)) AS similarity
+        FROM vector_matches vm
+        JOIN nodes n ON n.id = vm.node_id
+        ${whereClauses}
+        ORDER BY vm.distance
+        LIMIT ?
+      `, [vectorString, Math.max(limit * 2, 50), ...params, limit]);
+
+      return result.rows;
+    } catch (error) {
+      console.warn('[NodeSearch] Vector search unavailable, continuing without it:', error);
+      return [];
+    }
   }
 
   async getNodeCount(): Promise<number> {

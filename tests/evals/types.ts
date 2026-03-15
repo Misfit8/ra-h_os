@@ -1,10 +1,18 @@
 export type ScenarioExpectations = {
+  skillsRead?: string[];
+  skillsReadSoft?: string[];
+  skillsNotRead?: string[];
+  skillsNotReadSoft?: string[];
   toolsCalled?: string[];
   toolsCalledSoft?: string[];
+  toolsNotCalled?: string[];
+  toolsNotCalledSoft?: string[];
   responseContains?: string[];
   responseContainsSoft?: string[];
   responseNotContains?: string[];
   maxLatencyMs?: number;
+  maxTotalTokens?: number;
+  maxEstimatedCostUsd?: number;
 };
 
 export type ScenarioInput = {
@@ -24,6 +32,7 @@ export type Scenario = {
   expect?: ScenarioExpectations;
   description?: string;
   tools?: string[];
+  suites?: string[];
   enabled?: boolean;
   notes?: string;
 };

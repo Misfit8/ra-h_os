@@ -2,10 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { nodeService } from '@/services/database';
 import { Node, NodeFilters } from '@/types/database';
 import { autoEmbedQueue } from '@/services/embedding/autoEmbedQueue';
-import { hasSufficientContent } from '@/services/embedding/constants';
-import { DimensionService } from '@/services/database/dimensionService';
 import { generateDescription } from '@/services/database/descriptionService';
 import { scheduleAutoEdgeCreation } from '@/services/agents/autoEdge';
+import { normalizeDimensions, validateExplicitDescription } from '@/services/database/quality';
 
 export const runtime = 'nodejs';
 
@@ -97,11 +96,7 @@ export async function POST(request: NextRequest) {
     const eventDate = typeof body.event_date === 'string' ? body.event_date : null;
 
     // Process provided dimensions first (needed for description generation)
-    const providedDimensions = Array.isArray(body.dimensions) ? body.dimensions : [];
-    const trimmedProvidedDimensions = providedDimensions
-      .map((dim: unknown) => typeof dim === 'string' ? dim.trim() : '')
-      .filter(Boolean)
-      .slice(0, 8);
+    const trimmedProvidedDimensions = normalizeDimensions(body.dimensions, 5);
 
     // Use provided description if present, otherwise auto-generate
     let nodeDescription: string | undefined = typeof body.description === 'string' && body.description.trim()
@@ -127,41 +122,46 @@ export async function POST(request: NextRequest) {
       nodeDescription = body.title.slice(0, 280);
     }
 
+    const finalDescription = nodeDescription ?? body.title.slice(0, 280);
+
+    const descriptionError = validateExplicitDescription(finalDescription);
+    if (descriptionError) {
+      return NextResponse.json({
+        success: false,
+        error: descriptionError
+      }, { status: 400 });
+    }
+
     // Monitor description quality
-    if (nodeDescription && WEAK_PATTERNS.test(nodeDescription)) {
-      console.warn(`[DescriptionQuality] Weak description for node "${body.title}": "${nodeDescription}"`);
+    if (WEAK_PATTERNS.test(finalDescription)) {
+      console.warn(`[DescriptionQuality] Weak description for node "${body.title}": "${finalDescription}"`);
     }
 
-    // Auto-assign locked dimensions + keyword dimensions for all new nodes
-    const { locked, keywords } = await DimensionService.assignDimensions({
-      title: body.title,
-      notes: rawNotes || undefined,
-      link: body.link,
-      description: nodeDescription
-    });
-
-    // Ensure keyword dimensions exist in the database (create if new)
-    for (const keyword of keywords) {
-      await DimensionService.ensureKeywordDimension(keyword);
-    }
-
-    // Combine provided, locked, and keyword dimensions, remove duplicates
-    const finalDimensions = [...new Set([...trimmedProvidedDimensions, ...locked, ...keywords])]
-      .slice(0, 8); // max 8 total
+    // Use only provided dimensions (no auto-assignment)
+    const finalDimensions = trimmedProvidedDimensions;
     const rawChunk = typeof body.chunk === 'string' ? body.chunk : null;
     let chunkToStore = rawChunk;
     let chunkStatus: Node['chunk_status'];
 
     if (chunkToStore && chunkToStore.trim().length > 0) {
       chunkStatus = 'not_chunked';
-    } else if (!chunkToStore && hasSufficientContent(rawNotes)) {
-      chunkToStore = rawNotes;
-      chunkStatus = 'not_chunked';
+    } else {
+      // Build chunk from all available notes if not provided
+      // This ensures every node gets at least one chunk for search
+      const fallbackContent = [body.title, nodeDescription, rawNotes]
+        .filter(Boolean)
+        .join('\n\n')
+        .trim();
+
+      if (fallbackContent) {
+        chunkToStore = fallbackContent;
+        chunkStatus = 'not_chunked';
+      }
     }
 
     const node = await nodeService.createNode({
       title: body.title,
-      description: nodeDescription,
+      description: finalDescription,
       notes: rawNotes ?? undefined,
       event_date: eventDate ?? undefined,
       link: body.link,
@@ -171,7 +171,7 @@ export async function POST(request: NextRequest) {
       metadata: body.metadata || {}
     });
 
-    if (chunkStatus === 'not_chunked' && node.id && process.env.DISABLE_EMBEDDINGS !== 'true') {
+    if (chunkStatus === 'not_chunked' && node.id) {
       autoEmbedQueue.enqueue(node.id, { reason: 'node_created' });
     }
 

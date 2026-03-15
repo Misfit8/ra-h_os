@@ -27,36 +27,39 @@ RA-H uses a **trigger-based logging system** that automatically captures all dat
 
 ### Chat Metadata
 
-Every chat log includes detailed execution metadata:
+Every chat log includes detailed execution metadata. `helper-interactions.log` is the raw event stream; `chats.metadata` is the persisted summary used for audits and UI inspection.
 
 ```typescript
 metadata: {
   // Token tracking
-  prompt_tokens: number,
-  completion_tokens: number,
-  reasoning_tokens: number,
+  input_tokens: number,
+  output_tokens: number,
   total_tokens: number,
+  cache_write_tokens?: number,
+  cache_read_tokens?: number,
   
   // Cost tracking
-  cost: number,                  // USD cost for this chat
+  estimated_cost_usd: number,
+  model_used: string,
+  provider: 'anthropic' | 'openai',
   
   // Tool usage
-  tools_used: string[],          // Array of tool names called
+  tools_used?: string[],         // Unique tool names used in the chat
+  tool_calls_count?: number,     // Total tool invocations
+  tool_calls?: Array<{
+    toolName: string,
+    args: unknown,
+    result: unknown
+  }>,
   
   // Workflow tracking
-  is_workflow: boolean,
   workflow_key?: string,
   workflow_node_id?: number,
   
-  // Model parameters
-  reasoning_effort?: 'low' | 'medium' | 'high',
-  
   // Execution trace
-  trace?: {
-    session_id: string,
-    parent_session_id?: string,
-    execution_time_ms: number
-  }
+  session_id?: string,
+  trace_id?: string,
+  parent_chat_id?: number
 }
 ```
 
@@ -88,7 +91,7 @@ This prevents infinite database growth while preserving recent activity history.
 - **Action filtering** - Filter by INSERT/UPDATE
 - **Detailed view** - Click to see full snapshot_json
 - **Token/cost visibility** - Chat logs show usage and costs
-- **Tool usage** - See which tools were called per chat
+- **Tool usage** - See both the tool set used and full per-call payloads when captured
 
 **Query:**
 ```sql
@@ -111,18 +114,14 @@ LIMIT 100
 - GPT-4o Mini: $0.15/1M input, $0.60/1M output
 - Claude Sonnet 4.5: $3.00/1M input, $15.00/1M output
 
-**Typical costs:**
-- Easy mode chat: $0.01-0.03
-- Hard mode chat: $0.03-0.10
-- Integrate workflow: ~$0.18
-- Deep analysis: ~$0.33
+**Typical costs:** Vary by prompt size, tool activity, and provider cache hits.
 
 ## Token Analytics
 
 **Settings → Analytics panel shows:**
 - Total tokens used (all time)
 - Total cost (USD)
-- Breakdown by agent (ra-h, ra-h-easy, mini-rah, wise-rah)
+- Breakdown by helper
 - Breakdown by conversation thread
 - Average cost per chat
 
@@ -132,21 +131,74 @@ SELECT
   helper_name,
   COUNT(*) as chat_count,
   SUM(JSON_EXTRACT(metadata, '$.total_tokens')) as total_tokens,
-  SUM(JSON_EXTRACT(metadata, '$.cost')) as total_cost
+  SUM(JSON_EXTRACT(metadata, '$.estimated_cost_usd')) as total_cost
 FROM chats
 WHERE metadata IS NOT NULL
 GROUP BY helper_name
 ```
 
-## Evaluation (Future)
+## Evals Dashboard
 
-**Planned features:**
-- Edge quality ratings (user feedback via `edges.user_feedback`)
-- Memory node relevance scoring
-- Workflow success metrics
-- Connection discovery quality
+The generic Settings -> Logs panel is useful for quick inspection, but it is not the primary trace-review surface.
 
-**Current state:**
-- Infrastructure exists (`edges.user_feedback` column)
-- UI not yet implemented
-- Manual evaluation via logs table queries
+For proper evals, use:
+- `logs/evals.sqlite` as the dev-only trace store
+- `/evals` as the main review UI
+
+This evals path stores:
+- one `llm_chats` row per traced interaction
+- one `tool_calls` row per tool execution
+- shared `trace_id` values so chat/tool steps can be reviewed together
+- both synthetic scenarios and live app interactions when eval logging is enabled
+
+### How To Run
+
+Start the app with eval logging enabled:
+
+```bash
+npm run dev:evals
+```
+
+Then:
+- use the app normally for live traces
+- open [http://localhost:3000/evals](http://localhost:3000/evals)
+
+To run the scenario suite against the local app:
+
+```bash
+npm run evals
+```
+
+Requirements:
+- the dev server must already be running with eval logging enabled via `npm run dev:evals`
+- the scenario runner targets `http://localhost:3000` by default
+- the runner now waits up to 60s per scenario by default because current real latencies often exceed 10s
+
+Optional overrides:
+
+```bash
+RAH_EVALS_BASE_URL=http://localhost:3001 npm run evals
+RAH_EVALS_TIMEOUT_MS=90000 npm run evals
+```
+
+The `/evals` UI lets you review:
+- live runs vs scenario runs
+- full system message
+- user/assistant turn
+- tool spans with args/results
+- latency
+- token and cost data
+- cache fields
+- timing breakdown fields when available
+
+### Why This Is Separate From The Logs Table
+
+`logs` in the main SQLite database is trigger-based change logging. It mirrors a compact snapshot of chat rows, nodes, and edges.
+
+`logs/evals.sqlite` is the trace store for evaluation and review. It is the correct place to inspect:
+- per-trace chat rows
+- per-tool spans
+- scenario IDs
+- live-vs-scenario separation
+
+If you want to understand one interaction deeply, prefer `/evals` over Settings -> Logs.

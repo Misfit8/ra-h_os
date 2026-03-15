@@ -1,5 +1,13 @@
 {
-  "id": "golden-v1",
-  "name": "Golden Dataset v1",
-  "description": "Baseline eval scenarios for core RA-H helper behavior."
+  "id": "golden-ra-h-core-v2",
+  "name": "Golden RA-H Core v2",
+  "description": "Slim 5-scenario eval set for core RA-H usage: focused graph writes, skill-guided writes, indexed node search, chunk-grounded insight creation, and hub traversal.",
+  "inherits": "golden-v1",
+  "version": 2,
+  "focus": [
+    "tool-call correctness",
+    "skill usage only when appropriate",
+    "core retrieval/write behavior",
+    "latency/tokens/cost guards"
+  ]
 }

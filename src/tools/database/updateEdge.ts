@@ -1,12 +1,14 @@
 import { tool } from 'ai';
 import { z } from 'zod';
 import { edgeService } from '@/services/database/edges';
+import { validateEdgeExplanation } from '@/services/database/quality';
 
 export const updateEdgeTool = tool({
-  description: 'Update edge context/source',
+  description: 'Update an edge explanation and/or source. Explanations must explicitly state the relationship.',
   inputSchema: z.object({
     edge_id: z.number().describe('The ID of the edge to update'),
     updates: z.object({
+      explanation: z.string().optional().describe('Updated relationship explanation'),
       context: z.record(z.any()).optional().describe('Updated context information for this edge - can include explanation, relationship type, strength, notes, etc.'),
       source: z.enum(['user', 'ai_similarity', 'helper_name']).optional().describe('Updated source classification for this edge'),
     }).describe('Fields to update on the edge')
@@ -38,6 +40,34 @@ export const updateEdgeTool = tool({
         };
       }
 
+      if (typeof cleanUpdates.explanation === 'string') {
+        const explanationError = validateEdgeExplanation(cleanUpdates.explanation);
+        if (explanationError) {
+          return {
+            success: false,
+            error: explanationError,
+            data: existingEdge
+          };
+        }
+      }
+
+      if (
+        !cleanUpdates.explanation &&
+        cleanUpdates.context &&
+        typeof cleanUpdates.context === 'object' &&
+        !Array.isArray(cleanUpdates.context) &&
+        typeof cleanUpdates.context.explanation === 'string'
+      ) {
+        const explanationError = validateEdgeExplanation(cleanUpdates.context.explanation);
+        if (explanationError) {
+          return {
+            success: false,
+            error: explanationError,
+            data: existingEdge
+          };
+        }
+      }
+
       // Update the edge
       const updatedEdge = await edgeService.updateEdge(params.edge_id, cleanUpdates);
 
@@ -45,7 +75,7 @@ export const updateEdgeTool = tool({
       const updateDescriptions = [];
       if (cleanUpdates.context) updateDescriptions.push('context');
       if (cleanUpdates.source) updateDescriptions.push(`source to ${cleanUpdates.source}`);
-      
+
       return {
         success: true,
         data: updatedEdge,

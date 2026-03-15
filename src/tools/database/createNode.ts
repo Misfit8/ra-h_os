@@ -1,34 +1,41 @@
 import { tool } from 'ai';
 import { z } from 'zod';
+import { getInternalApiBaseUrl } from '@/services/runtime/apiBase';
 import { formatNodeForChat } from '../infrastructure/nodeFormatter';
+import { normalizeDimensions, validateExplicitDescription } from '@/services/database/quality';
 
 export const createNodeTool = tool({
-  description: 'Create node with title/content/link and optional dimensions (locked dimensions auto-assigned)',
+  description: 'Create node. Description is REQUIRED and must be explicit about what the thing is (podcast, chat summary, idea, etc).',
   inputSchema: z.object({
     title: z.string().describe('The title of the node'),
-    description: z.string().max(280).optional().describe('WHAT this is + WHY it matters. Extremely concise. No "discusses/explores". Auto-generated if omitted.'),
-    notes: z.string().optional().describe('The main notes or content for this node'),
+    notes: z.string().optional().describe('User notes, analysis, or thoughts about this node'),
+    description: z.string().max(280).describe('REQUIRED. Explicitly state WHAT this is (e.g. podcast episode, conversation summary, user insight) + WHY it matters for context grounding.'),
     link: z.string().optional().describe('A URL link to the source'),
-    event_date: z.string().optional().describe('ISO date string for time-anchored nodes (e.g. meetings, events)'),
+    event_date: z.string().optional().describe('When the thing actually happened (ISO 8601). Not when it was added to the graph.'),
     dimensions: z
       .array(z.string())
       .max(5)
       .optional()
-      .describe('Optional dimension tags to apply to this node (0-5 items). Locked dimensions will be auto-assigned.'),
+      .describe('Optional dimension tags to apply to this node (0-5 items).'),
     chunk: z.string().optional().describe('Raw content for later processing - CRITICAL for extracted content from URLs'),
     metadata: z.record(z.any()).optional().describe('Additional metadata like source info, extraction details, etc.')
   }),
   execute: async (params) => {
     console.log('🎯 CreateNode tool called with params:', JSON.stringify(params, null, 2));
     try {
-      const rawDimensions = params.dimensions || [];
-      const trimmedDimensions = rawDimensions
-        .map(d => typeof d === 'string' ? d.trim() : '')
-        .filter(Boolean)
-        .slice(0, 5); // Limit to 5 dimensions max
+      const descriptionError = validateExplicitDescription(params.description);
+      if (descriptionError) {
+        return {
+          success: false,
+          error: `${descriptionError} Do not retry with minor rephrasing in the same turn. Rewrite the description so it explicitly names the entity type, such as note, node, person, episode, article, project, test node, or skill, and states why it matters.`,
+          data: null
+        };
+      }
+
+      const trimmedDimensions = normalizeDimensions(params.dimensions || [], 5);
 
       // Call the nodes API endpoint
-      const response = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/api/nodes`, {
+      const response = await fetch(`${getInternalApiBaseUrl()}/api/nodes`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...params, dimensions: trimmedDimensions })
@@ -57,7 +64,7 @@ export const createNodeTool = tool({
           ...result.data,
           formatted_display: formattedDisplay
         },
-        message: `Created node ${formattedDisplay} with dimensions: ${result.data.dimensions ? result.data.dimensions.join(', ') : 'auto-assigned'}`
+        message: `Created node ${formattedDisplay} with dimensions: ${result.data.dimensions ? result.data.dimensions.join(', ') : 'none'}`
       };
     } catch (error) {
       return {

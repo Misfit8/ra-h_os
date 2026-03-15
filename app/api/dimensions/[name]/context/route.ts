@@ -44,7 +44,7 @@ export async function GET(
     const context: DimensionContext = {
       name: dimension.name,
       description: dimension.description,
-      isPriority: dimension.is_priority === 1,
+      isPriority: false,
       nodeCount: countResult?.count || 0,
     };
 

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSQLiteClient } from '@/services/database/sqlite-client';
 import { eventBroadcaster } from '@/services/events';
-import { DimensionService } from '@/services/database/dimensionService';
+import { normalizeDimensionName, validateDimensionDescription } from '@/services/database/quality';
 
 export const runtime = 'nodejs';
 
@@ -20,11 +20,10 @@ export async function GET() {
         d.name AS dimension,
         d.description,
         d.icon,
-        d.is_priority AS isPriority,
         COALESCE(dc.count, 0) AS count
       FROM dimensions d
       LEFT JOIN dimension_counts dc ON dc.dimension = d.name
-      ORDER BY d.is_priority DESC, d.name ASC
+      ORDER BY d.name ASC
     `);
 
     return NextResponse.json({
@@ -33,7 +32,7 @@ export async function GET() {
         dimension: row.dimension,
         description: row.description,
         icon: row.icon || null,
-        isPriority: Boolean(row.isPriority),
+        isPriority: false,
         count: Number(row.count)
       }))
     });
@@ -49,10 +48,9 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const rawName = typeof body?.name === 'string' ? body.name.trim() : '';
+    const rawName = typeof body?.name === 'string' ? normalizeDimensionName(body.name) : '';
     const description = typeof body?.description === 'string' ? body.description.trim() : null;
-    const icon = typeof body?.icon === 'string' ? body.icon.trim() : null;
-    const isPriority = typeof body?.isPriority === 'boolean' ? body.isPriority : false;
+    const icon = typeof body?.icon === 'string' ? body.icon.trim() || null : null;
     
     if (!rawName) {
       return NextResponse.json({
@@ -61,10 +59,11 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    if (description && description.length > 500) {
+    const descriptionError = validateDimensionDescription(description || '');
+    if (descriptionError) {
       return NextResponse.json({
         success: false,
-        error: 'Description must be 500 characters or less'
+        error: descriptionError
       }, { status: 400 });
     }
 
@@ -75,10 +74,9 @@ export async function POST(request: NextRequest) {
       ON CONFLICT(name) DO UPDATE SET
         description = COALESCE(?, description),
         icon = COALESCE(?, icon),
-        is_priority = COALESCE(?, is_priority),
         updated_at = CURRENT_TIMESTAMP
       RETURNING name, description, icon, is_priority
-    `, [rawName, description, icon, isPriority ? 1 : 0, description, icon, isPriority ? 1 : 0]);
+    `, [rawName, description, icon, 0, description, icon]);
 
     if (result.rows.length === 0) {
       throw new Error('Failed to create dimension');
@@ -86,12 +84,12 @@ export async function POST(request: NextRequest) {
 
     const row = result.rows[0];
     const dimension = row.name as string;
-    const isPriorityValue = Boolean(row.is_priority);
     const descriptionValue = row.description as string | null;
+    const iconValue = (row.icon as string | null) || null;
 
     eventBroadcaster.broadcast({
       type: 'DIMENSION_UPDATED',
-      data: { dimension, isPriority: isPriorityValue, description: descriptionValue, count: 0 }
+      data: { dimension, isPriority: false, description: descriptionValue, icon: iconValue, count: 0 }
     });
 
     return NextResponse.json({
@@ -99,7 +97,8 @@ export async function POST(request: NextRequest) {
       data: {
         dimension,
         description: descriptionValue,
-        isPriority: isPriorityValue
+        icon: iconValue,
+        isPriority: false
       }
     });
   } catch (error) {
@@ -114,38 +113,11 @@ export async function POST(request: NextRequest) {
 export async function PUT(request: NextRequest) {
   try {
     const body = await request.json();
-    const currentName = typeof body?.currentName === 'string' ? body.currentName.trim() : '';
-    const newName = typeof body?.newName === 'string' ? body.newName.trim() : '';
-    const name = typeof body?.name === 'string' ? body.name.trim() : '';
+    const currentName = typeof body?.currentName === 'string' ? normalizeDimensionName(body.currentName) : '';
+    const newName = typeof body?.newName === 'string' ? normalizeDimensionName(body.newName) : '';
+    const name = typeof body?.name === 'string' ? normalizeDimensionName(body.name) : '';
     const description = typeof body?.description === 'string' ? body.description.trim() : '';
-    const isPriority = typeof body?.isPriority === 'boolean' ? body.isPriority : undefined;
-    
-    // Handle isPriority update (lock/unlock) - simple case
-    if (isPriority !== undefined && name && !currentName && !newName) {
-      const sqlite = getSQLiteClient();
-      const updateResult = sqlite.prepare(`
-        UPDATE dimensions 
-        SET is_priority = ?, updated_at = CURRENT_TIMESTAMP 
-        WHERE name = ?
-      `).run(isPriority ? 1 : 0, name);
-
-      if (updateResult.changes === 0) {
-        return NextResponse.json({
-          success: false,
-          error: 'Dimension not found'
-        }, { status: 404 });
-      }
-
-      eventBroadcaster.broadcast({
-        type: 'DIMENSION_UPDATED',
-        data: { dimension: name, isPriority }
-      });
-
-      return NextResponse.json({
-        success: true,
-        data: { dimension: name, isPriority }
-      });
-    }
+    const icon = body?.icon !== undefined ? (typeof body.icon === 'string' ? body.icon.trim() || null : null) : undefined;
     
     // Handle dimension name change
     if (currentName && newName && currentName !== newName) {
@@ -180,16 +152,16 @@ export async function PUT(request: NextRequest) {
           updates.push('description = ?');
           values.push(description || null);
         }
-        
-        if (isPriority !== undefined) {
-          updates.push('is_priority = ?');
-          values.push(isPriority ? 1 : 0);
+
+        if (icon !== undefined) {
+          updates.push('icon = ?');
+          values.push(icon);
         }
-        
+
         values.push(currentName);
-        
+
         const dimUpdate = sqlite.prepare(`
-          UPDATE dimensions 
+          UPDATE dimensions
           SET ${updates.join(', ')}
           WHERE name = ?
         `).run(...values);
@@ -220,7 +192,7 @@ export async function PUT(request: NextRequest) {
           dimension: newName, 
           previousName: currentName,
           description: description || undefined,
-          isPriority: isPriority !== undefined ? isPriority : undefined,
+          isPriority: false,
           renamed: true 
         }
       });
@@ -231,7 +203,7 @@ export async function PUT(request: NextRequest) {
           dimension: newName,
           previousName: currentName,
           description: description || undefined,
-          isPriority: isPriority !== undefined ? isPriority : undefined,
+          isPriority: false,
           nodeLinksUpdated: updateResult.nodeLinksUpdated
         }
       });
@@ -246,34 +218,37 @@ export async function PUT(request: NextRequest) {
       }, { status: 400 });
     }
 
-    if (description && description.length > 500) {
-      return NextResponse.json({
-        success: false,
-        error: 'Description must be 500 characters or less'
-      }, { status: 400 });
+    if (description) {
+      const descriptionError = validateDimensionDescription(description);
+      if (descriptionError) {
+        return NextResponse.json({
+          success: false,
+          error: descriptionError
+        }, { status: 400 });
+      }
     }
 
-    const sqlite = getSQLiteClient();
-    
-    // Build update query
-    if (description !== '' || isPriority !== undefined) {
+    if (description !== '' || icon !== undefined) {
+      const sqlite = getSQLiteClient();
+      
+      // Build update query
       const updates: string[] = ['updated_at = CURRENT_TIMESTAMP'];
       const values: any[] = [];
-      
+
       if (description !== '') {
         updates.push('description = ?');
         values.push(description || null);
       }
-      
-      if (isPriority !== undefined) {
-        updates.push('is_priority = ?');
-        values.push(isPriority ? 1 : 0);
+
+      if (icon !== undefined) {
+        updates.push('icon = ?');
+        values.push(icon);
       }
-      
+
       values.push(targetName);
-      
+
       const updateResult = sqlite.prepare(`
-        UPDATE dimensions 
+        UPDATE dimensions
         SET ${updates.join(', ')}
         WHERE name = ?
       `).run(...values);
@@ -285,19 +260,19 @@ export async function PUT(request: NextRequest) {
         }, { status: 404 });
       }
     } else {
-      // No updates provided
       return NextResponse.json({
         success: false,
-        error: 'At least one update field (description or isPriority) must be provided'
+        error: 'At least one update field (description, icon, or newName) must be provided'
       }, { status: 400 });
     }
 
     eventBroadcaster.broadcast({
       type: 'DIMENSION_UPDATED',
-      data: { 
-        dimension: targetName, 
+      data: {
+        dimension: targetName,
         description: description !== '' ? description : undefined,
-        isPriority: isPriority !== undefined ? isPriority : undefined
+        icon: icon !== undefined ? icon : undefined,
+        isPriority: false
       }
     });
 
@@ -306,7 +281,8 @@ export async function PUT(request: NextRequest) {
       data: {
         dimension: targetName,
         description: description !== '' ? description : undefined,
-        isPriority: isPriority !== undefined ? isPriority : undefined
+        icon: icon !== undefined ? icon : undefined,
+        isPriority: false
       }
     });
   } catch (error) {

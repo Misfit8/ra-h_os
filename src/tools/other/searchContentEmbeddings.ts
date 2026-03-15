@@ -4,7 +4,7 @@ import { chunkService } from '@/services/database/chunks';
 import { EmbeddingService } from '@/services/embeddings';
 
 export const searchContentEmbeddingsTool = tool({
-  description: 'Semantic search over node chunks with text fallback for reliability',
+  description: 'Search source chunks with hybrid retrieval: vector similarity plus FTS/keyword fallback merged for reliability.',
   inputSchema: z.object({
     query: z.string().describe('The search query to find semantically similar content'),
     limit: z.number().min(1).max(20).default(5).describe('Maximum number of results to return (default: 5)'),
@@ -107,7 +107,7 @@ export const searchContentEmbeddingsTool = tool({
           searched_nodes: searchNodeIds || 'all',
           count: chunks.length,
           similarity_threshold,
-          search_method: 'vector_search',
+          search_method: query ? 'hybrid_vector_fts' : 'vector_search',
           search_time_ms: searchTime,
           suggestions: suggestions.length > 0 ? suggestions : undefined
         }

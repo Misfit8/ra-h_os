@@ -1,12 +1,12 @@
 import { tool } from 'ai';
 import { z } from 'zod';
+import { getInternalApiBaseUrl } from '@/services/runtime/apiBase';
 
 export const createDimensionTool = tool({
-  description: 'Create a new dimension or update existing dimension. IMPORTANT: Always ask the user for a description explaining what belongs in this dimension before creating it. Dimensions without descriptions cannot be auto-assigned.',
+  description: 'Create a new dimension. Always provide a description explaining what belongs in this category.',
   inputSchema: z.object({
     name: z.string().describe('Dimension name'),
-    description: z.string().min(1).max(500).describe('Dimension description explaining what content belongs in this dimension (required, max 500 characters)'),
-    isPriority: z.boolean().optional().describe('Whether to lock this dimension for auto-assignment (default: false)')
+    description: z.string().min(1).max(500).describe('Dimension description explaining what content belongs in this dimension (required, max 500 characters)')
   }),
   execute: async (params) => {
     console.log('📁 CreateDimension tool called with params:', JSON.stringify(params, null, 2));
@@ -21,13 +21,12 @@ export const createDimensionTool = tool({
       }
 
       // Call POST /api/dimensions
-      const response = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/api/dimensions`, {
+      const response = await fetch(`${getInternalApiBaseUrl()}/api/dimensions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: trimmedName,
-          description: params.description.trim(),
-          isPriority: params.isPriority || false
+          description: params.description.trim()
         })
       });
 
@@ -52,7 +51,7 @@ export const createDimensionTool = tool({
       return {
         success: true,
         data: result.data,
-        message: `Created dimension "${trimmedName}"${params.isPriority ? ' (locked)' : ''}${params.description ? ' with description' : ''}`
+        message: `Created dimension "${trimmedName}"${params.description ? ' with description' : ''}`
       };
     } catch (error) {
       return {
@@ -63,4 +62,3 @@ export const createDimensionTool = tool({
     }
   }
 });
-

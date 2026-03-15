@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { nodeService } from '@/services/database';
 import { autoEmbedQueue } from '@/services/embedding/autoEmbedQueue';
 import { hasSufficientContent } from '@/services/embedding/constants';
+import { normalizeDimensions, validateExplicitDescription } from '@/services/database/quality';
 
 export const runtime = 'nodejs';
 
@@ -70,6 +71,20 @@ export async function PUT(
 
     const updates: Record<string, unknown> = { ...body };
     let shouldQueueEmbed = false;
+
+    if (typeof body.description === 'string') {
+      const descriptionError = validateExplicitDescription(body.description);
+      if (descriptionError) {
+        return NextResponse.json({
+          success: false,
+          error: descriptionError
+        }, { status: 400 });
+      }
+    }
+
+    if (Array.isArray(body.dimensions)) {
+      updates.dimensions = normalizeDimensions(body.dimensions, 5);
+    }
 
     const incomingChunk = typeof body.chunk === 'string' ? body.chunk : undefined;
     const incomingNotes = typeof body.notes === 'string' ? body.notes : undefined;

@@ -1,12 +1,12 @@
 import { tool } from 'ai';
 import { z } from 'zod';
+import { getInternalApiBaseUrl } from '@/services/runtime/apiBase';
 
 export const queryDimensionsTool = tool({
-  description: 'Query dimensions with optional filtering by name, priority status, or search term. Returns dimensions with their node counts.',
+  description: 'List dimensions with node counts. Use this to inspect the user\'s organizational categories.',
   inputSchema: z.object({
     filters: z.object({
       search: z.string().describe('Search term to match against dimension names').optional(),
-      isPriority: z.boolean().describe('Filter by priority (locked) status').optional(),
       limit: z.number().min(1).max(100).default(50).describe('Maximum number of results to return')
     }).optional()
   }),
@@ -14,7 +14,7 @@ export const queryDimensionsTool = tool({
     console.log('📁 QueryDimensions tool called with filters:', JSON.stringify(filters, null, 2));
     try {
       const limit = filters.limit || 50;
-      const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
+      const baseUrl = getInternalApiBaseUrl();
 
       // Use existing API endpoint for dimension listing
       const response = await fetch(`${baseUrl}/api/dimensions/popular`);
@@ -48,7 +48,6 @@ export const queryDimensionsTool = tool({
       let dimensions = result.data as Array<{
         dimension: string;
         count: number;
-        isPriority: boolean;
         description: string | null;
       }>;
 
@@ -60,11 +59,6 @@ export const queryDimensionsTool = tool({
         );
       }
 
-      // Filter by priority status
-      if (filters.isPriority !== undefined) {
-        dimensions = dimensions.filter(d => d.isPriority === filters.isPriority);
-      }
-
       // Apply limit
       const limitedDimensions = dimensions.slice(0, limit);
 
@@ -72,18 +66,16 @@ export const queryDimensionsTool = tool({
       const formattedDimensions = limitedDimensions.map(d => ({
         name: d.dimension,
         count: d.count,
-        isPriority: d.isPriority,
         description: d.description
       }));
 
       // Build message
       const filterParts: string[] = [];
       if (filters.search) filterParts.push(`matching "${filters.search}"`);
-      if (filters.isPriority !== undefined) filterParts.push(filters.isPriority ? 'priority only' : 'non-priority only');
       const filterDesc = filterParts.length > 0 ? ` (${filterParts.join(', ')})` : '';
 
       const dimensionList = formattedDimensions
-        .map(d => `• ${d.name}${d.isPriority ? ' 🔒' : ''} (${d.count} nodes)${d.description ? ` - ${d.description}` : ''}`)
+        .map(d => `• ${d.name} (${d.count} nodes)${d.description ? ` - ${d.description}` : ''}`)
         .join('\n');
 
       return {

@@ -42,6 +42,16 @@ function prettyJson(value: string | null) {
   }
 }
 
+function parseJsonArray(value: string | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 export default function EvalsClient({ traces, scenarioList }: Props) {
   const [openTraceId, setOpenTraceId] = useState<string | null>(traces[0]?.chat.trace_id || null);
   const [comments, setComments] = useState<Record<string, string>>(() => {
@@ -74,7 +84,7 @@ export default function EvalsClient({ traces, scenarioList }: Props) {
         cost: chat.estimated_cost_usd ?? null,
         cache: chat.cache_hit == null ? 'n/a' : chat.cache_hit ? 'hit' : 'miss',
         cacheTokens: `${chat.cache_read_tokens ?? 0}/${chat.cache_write_tokens ?? 0}`,
-        toolCount: toolCalls.length,
+        toolCount: chat.tool_calls_count ?? toolCalls.length,
         status,
         userPreview: formatPreview(chat.user_message),
         timestamp: chat.ts,
@@ -290,11 +300,28 @@ export default function EvalsClient({ traces, scenarioList }: Props) {
             <div><strong>Mode:</strong> {openTrace.chat.mode || 'n/a'}</div>
             <div><strong>Workflow:</strong> {openTrace.chat.workflow_key || '—'}</div>
             <div><strong>Latency:</strong> {openTrace.chat.latency_ms ?? 'n/a'} ms</div>
+            <div><strong>First chunk:</strong> {openTrace.chat.first_chunk_latency_ms ?? 'n/a'} ms</div>
+            <div><strong>First token:</strong> {openTrace.chat.first_token_latency_ms ?? 'n/a'} ms</div>
             <div><strong>Tokens:</strong> {openTrace.chat.input_tokens ?? 0}/{openTrace.chat.output_tokens ?? 0} (total {openTrace.chat.total_tokens ?? 0})</div>
             <div><strong>Cost:</strong> {openTrace.chat.estimated_cost_usd == null ? 'n/a' : `$${openTrace.chat.estimated_cost_usd.toFixed(4)}`}</div>
             <div><strong>Cache:</strong> {openTrace.chat.cache_hit == null ? 'n/a' : openTrace.chat.cache_hit ? 'hit' : 'miss'} (read {openTrace.chat.cache_read_tokens ?? 0} / write {openTrace.chat.cache_write_tokens ?? 0})</div>
-            <div><strong>Tools:</strong> {openTrace.toolCalls.length}</div>
+            <div><strong>Tools:</strong> {openTrace.chat.tool_calls_count ?? openTrace.toolCalls.length}</div>
           </div>
+
+          <div style={{ marginBottom: 16, display: 'flex', gap: 16, flexWrap: 'wrap', color: '#444' }}>
+            {(openTrace.chat.prompt_build_ms ?? 0) > 0 && <div><strong>Prompt build:</strong> {openTrace.chat.prompt_build_ms} ms</div>}
+            {(openTrace.chat.tools_build_ms ?? 0) > 0 && <div><strong>Tools build:</strong> {openTrace.chat.tools_build_ms} ms</div>}
+            {(openTrace.chat.model_resolve_ms ?? 0) > 0 && <div><strong>Model resolve:</strong> {openTrace.chat.model_resolve_ms} ms</div>}
+            {(openTrace.chat.message_assembly_ms ?? 0) > 0 && <div><strong>Message assembly:</strong> {openTrace.chat.message_assembly_ms} ms</div>}
+            {(openTrace.chat.stream_setup_ms ?? 0) > 0 && <div><strong>Stream setup:</strong> {openTrace.chat.stream_setup_ms} ms</div>}
+            {(openTrace.chat.tool_loop_ms ?? 0) > 0 && <div><strong>Tool loop:</strong> {openTrace.chat.tool_loop_ms} ms</div>}
+          </div>
+
+          {parseJsonArray(openTrace.chat.tools_used_json).length > 0 ? (
+            <div style={{ marginBottom: 16 }}>
+              <strong>Tools used:</strong> {parseJsonArray(openTrace.chat.tools_used_json).join(', ')}
+            </div>
+          ) : null}
 
           <div style={{ marginBottom: 12 }}>
             <div><strong>Comment:</strong></div>
