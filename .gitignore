@@ -48,6 +48,7 @@ pgdata/
 # Migration temporary files
 migration-report-*.json
 *.sql
+!scripts/seed.sql
 
 # Logs (only root logs directory, not app/api/logs)
 /logs/
