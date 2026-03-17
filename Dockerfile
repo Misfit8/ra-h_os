@@ -41,7 +41,6 @@ RUN adduser --system --uid 1001 nextjs
 # Copy built app
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/public ./public
 
 # Copy sqlite extensions and seed
 COPY --from=builder /app/vendor ./vendor
