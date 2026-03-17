@@ -15,6 +15,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { z } from 'zod';
+import { verifyAccessToken } from '@/lib/oauth/jwt';
 
 import { nodeService, edgeService } from '@/services/database';
 import { getSQLiteClient } from '@/services/database/sqlite-client';
@@ -516,6 +517,41 @@ function createRAHServer(): McpServer {
  * Handle MCP POST requests (tool calls)
  */
 export async function POST(req: NextRequest) {
+  // Validate Bearer token
+  const authHeader = req.headers.get('authorization');
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+
+  if (!token) {
+    const base = process.env.NEXT_PUBLIC_BASE_URL || '';
+    return NextResponse.json(
+      { error: 'unauthorized', error_description: 'Bearer token required' },
+      {
+        status: 401,
+        headers: {
+          'WWW-Authenticate': `Bearer resource="${base}/api/mcp"`,
+          'Access-Control-Allow-Origin': '*',
+        },
+      }
+    );
+  }
+
+  let authInfo;
+  try {
+    authInfo = await verifyAccessToken(token);
+  } catch {
+    const base = process.env.NEXT_PUBLIC_BASE_URL || '';
+    return NextResponse.json(
+      { error: 'unauthorized', error_description: 'Invalid or expired token' },
+      {
+        status: 401,
+        headers: {
+          'WWW-Authenticate': `Bearer resource="${base}/api/mcp"`,
+          'Access-Control-Allow-Origin': '*',
+        },
+      }
+    );
+  }
+
   try {
     const server = createRAHServer();
     const transport = new WebStandardStreamableHTTPServerTransport({
@@ -523,7 +559,7 @@ export async function POST(req: NextRequest) {
     });
 
     await server.connect(transport);
-    const response = await transport.handleRequest(req);
+    const response = await transport.handleRequest(req, { authInfo });
 
     await transport.close();
     await server.close();
@@ -560,7 +596,7 @@ export async function OPTIONS() {
     headers: {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Accept, Mcp-Session-Id',
+      'Access-Control-Allow-Headers': 'Content-Type, Accept, Mcp-Session-Id, Authorization',
     },
   });
 }
