@@ -35,9 +35,6 @@ ENV NEXT_TELEMETRY_DISABLED=1
 
 RUN apt-get update && apt-get install -y sqlite3 && rm -rf /var/lib/apt/lists/*
 
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 nextjs
-
 # Copy built app
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
@@ -47,11 +44,8 @@ COPY --from=builder /app/vendor ./vendor
 COPY --from=builder /app/scripts/seed.sql ./scripts/seed.sql
 COPY --from=builder /app/scripts/railway-start.sh ./scripts/railway-start.sh
 
-# Ensure data dir exists
-RUN mkdir -p /data && chown nextjs:nodejs /data
+RUN mkdir -p /data
 RUN chmod +x ./scripts/railway-start.sh
-
-USER nextjs
 
 EXPOSE 3000
 ENV PORT=3000
