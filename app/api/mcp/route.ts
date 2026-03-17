@@ -517,18 +517,27 @@ function createRAHServer(): McpServer {
  * Handle MCP POST requests (tool calls)
  */
 export async function POST(req: NextRequest) {
+  console.log('[api/mcp] POST received', {
+    contentType: req.headers.get('content-type'),
+    accept: req.headers.get('accept'),
+    hasAuth: !!req.headers.get('authorization'),
+  });
+
   // Validate Bearer token
   const authHeader = req.headers.get('authorization');
   const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
 
+  const base = process.env.NEXT_PUBLIC_BASE_URL || '';
+  const resourceMetadataUrl = `${base}/.well-known/oauth-protected-resource`;
+
   if (!token) {
-    const base = process.env.NEXT_PUBLIC_BASE_URL || '';
+    console.log('[api/mcp] no token, returning 401');
     return NextResponse.json(
       { error: 'unauthorized', error_description: 'Bearer token required' },
       {
         status: 401,
         headers: {
-          'WWW-Authenticate': `Bearer resource="${base}/api/mcp"`,
+          'WWW-Authenticate': `Bearer realm="${base}", resource_metadata="${resourceMetadataUrl}"`,
           'Access-Control-Allow-Origin': '*',
         },
       }
@@ -538,14 +547,15 @@ export async function POST(req: NextRequest) {
   let authInfo;
   try {
     authInfo = await verifyAccessToken(token);
-  } catch {
-    const base = process.env.NEXT_PUBLIC_BASE_URL || '';
+    console.log('[api/mcp] token verified, clientId:', authInfo.clientId);
+  } catch (err) {
+    console.error('[api/mcp] token verification failed:', err);
     return NextResponse.json(
       { error: 'unauthorized', error_description: 'Invalid or expired token' },
       {
         status: 401,
         headers: {
-          'WWW-Authenticate': `Bearer resource="${base}/api/mcp"`,
+          'WWW-Authenticate': `Bearer realm="${base}", resource_metadata="${resourceMetadataUrl}"`,
           'Access-Control-Allow-Origin': '*',
         },
       }
@@ -604,7 +614,8 @@ export async function OPTIONS() {
 /**
  * GET returns server info
  */
-export async function GET() {
+export async function GET(req: NextRequest) {
+  console.log('[api/mcp] GET received');
   const tools = ['rah_search_nodes', 'rah_get_nodes', 'rah_query_edges', 'rah_list_dimensions'];
 
   if (ALLOW_WRITES) {

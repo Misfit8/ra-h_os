@@ -65,8 +65,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       {
         access_token: accessToken,
-        token_type: 'bearer',
+        token_type: 'Bearer',
         expires_in: 3600,
+        scope: 'mcp',
       },
       { headers: CORS_HEADERS }
     );
