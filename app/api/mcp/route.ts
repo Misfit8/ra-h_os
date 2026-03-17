@@ -566,17 +566,17 @@ export async function POST(req: NextRequest) {
     const server = createRAHServer();
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
+      enableJsonResponse: true,
     });
 
     await server.connect(transport);
     const response = await transport.handleRequest(req, { authInfo });
 
-    await transport.close();
-    await server.close();
+    console.log('[api/mcp] handleRequest response status:', response.status);
 
     return response;
   } catch (error) {
-    console.error('MCP request error:', error);
+    console.error('[api/mcp] handleRequest error:', error);
 
     return NextResponse.json(
       {
