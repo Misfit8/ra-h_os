@@ -23,6 +23,8 @@ COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NEXT_PUBLIC_DEPLOYMENT_MODE=cloud
 ENV NEXT_PUBLIC_ENABLE_SUBSCRIPTION_BACKEND=false
+ENV SQLITE_VEC_EXTENSION_PATH=/app/vendor/sqlite-extensions/vec0.so
+ENV SQLITE_DB_PATH=/tmp/rah-build.sqlite
 RUN npm run build
 
 # Production image
