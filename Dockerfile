@@ -10,7 +10,7 @@ WORKDIR /app
 # Install dependencies
 FROM base AS deps
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm install --legacy-peer-deps
 
 # Rebuild native modules for Linux
 RUN npm rebuild better-sqlite3
