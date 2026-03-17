@@ -14,4 +14,5 @@ else
   echo "[railway-start] Database exists at $DB_PATH — skipping seed."
 fi
 
+export SQLITE_VEC_EXTENSION_PATH=/app/vendor/sqlite-extensions/vec0.so
 exec node server.js
