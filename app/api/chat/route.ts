@@ -1,6 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { generateText } from 'ai';
-import { anthropic } from '@ai-sdk/anthropic';
 
 export const runtime = 'nodejs';
 
@@ -120,14 +118,33 @@ export async function POST(request: NextRequest) {
     const nodes = await fetchRelevantNodes(searchQuery);
     const systemPrompt = buildSystemPrompt(nodes);
 
-    const { text } = await generateText({
-      model: anthropic('claude-sonnet-4-20250514'),
-      system: systemPrompt,
-      messages: messages.map((m) => ({
-        role: m.role as 'user' | 'assistant',
-        content: m.content,
-      })),
+    const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY ?? '',
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1024,
+        system: systemPrompt,
+        messages: messages.map((m) => ({
+          role: m.role as 'user' | 'assistant',
+          content: m.content,
+        })),
+      }),
     });
+
+    if (!anthropicRes.ok) {
+      const err = await anthropicRes.text();
+      throw new Error(`Anthropic API error: ${err}`);
+    }
+
+    const anthropicData = await anthropicRes.json() as {
+      content: Array<{ type: string; text: string }>;
+    };
+    const text = anthropicData.content.find((b) => b.type === 'text')?.text ?? '';
 
     const actions_taken = await parseAndExecuteActions(text);
 
