@@ -10,6 +10,10 @@ function registerServiceWorker() {
     navigator.serviceWorker.register('/sw.js').catch((err) => {
       console.error('[SW] Registration failed:', err);
     });
+    // When a new SW activates and takes control, reload to get fresh JS bundle
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      window.location.reload();
+    });
   }
 }
 
@@ -1091,6 +1095,7 @@ export default function ChatClient() {
   );
 
   const renderGraph = () => {
+    try {
     const selectedNode = selectedGraphId !== null ? allGraphNodes[selectedGraphId] : null;
     const connections = selectedGraphId !== null
       ? graphEdges.filter((e) => e.from_node_id === selectedGraphId || e.to_node_id === selectedGraphId)
@@ -1200,6 +1205,10 @@ export default function ChatClient() {
         </div>
       </div>
     );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return <div style={S.errorBanner} role="alert">Graph render error: {msg}</div>;
+    }
   };
 
   const tabContent: Record<Tab, () => React.ReactNode> = {
