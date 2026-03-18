@@ -21,6 +21,12 @@ function isIOS() {
   );
 }
 
+// Typed BeforeInstallPromptEvent (not yet in TS lib)
+interface BeforeInstallPromptEvent extends Event {
+  prompt(): Promise<void>;
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>;
+}
+
 function canShare(data: ShareData) {
   return typeof navigator !== 'undefined' && !!navigator.share && navigator.canShare?.(data);
 }
@@ -89,12 +95,14 @@ const S = {
     flexDirection: isDesktop ? 'column' : 'row',
     flexShrink: 0,
     width: isDesktop ? '180px' : '100%',
-    height: isDesktop ? '100%' : '60px',
+    // On mobile: 60px tab bar + gesture bar clearance
+    height: isDesktop ? '100%' : 'calc(60px + env(safe-area-inset-bottom))',
     borderRight: isDesktop ? '1px solid #1a1a1a' : 'none',
     borderTop: isDesktop ? 'none' : '1px solid #1a1a1a',
     background: '#0a0a0a',
     order: isDesktop ? 0 : 2,
     paddingTop: isDesktop ? '16px' : 0,
+    paddingBottom: isDesktop ? 0 : 'env(safe-area-inset-bottom)',
   }),
 
   navBrand: {
@@ -383,6 +391,7 @@ export default function ChatClient() {
   const [activeTab, setActiveTab] = useState<Tab>(initialTab);
   const [isDesktop, setIsDesktop] = useState(false);
   const [showIOSPrompt, setShowIOSPrompt] = useState(false);
+  const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
 
   // Chat state
   const [messages, setMessages] = useState<Message[]>([]);
@@ -403,20 +412,35 @@ export default function ChatClient() {
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  // Responsive detection + SW registration + iOS prompt
+  // Responsive detection + SW registration + install prompts
   useEffect(() => {
-    const mq = window.matchMedia('(min-width: 768px)');
+    // 600px breakpoint matches Samsung A16 5G (412px viewport) per device spec
+    const mq = window.matchMedia('(min-width: 600px)');
     setIsDesktop(mq.matches);
     const handler = (e: MediaQueryListEvent) => setIsDesktop(e.matches);
     mq.addEventListener('change', handler);
 
     registerServiceWorker();
 
+    // iOS: manual prompt (iOS Safari never fires beforeinstallprompt)
     if (isIOS()) {
       setShowIOSPrompt(true);
     }
 
-    return () => mq.removeEventListener('change', handler);
+    // Android / Chrome: capture the native install prompt
+    const onBeforeInstall = (e: Event) => {
+      e.preventDefault();
+      setInstallPrompt(e as BeforeInstallPromptEvent);
+    };
+    window.addEventListener('beforeinstallprompt', onBeforeInstall);
+
+    // Hide install prompt if already installed
+    window.addEventListener('appinstalled', () => setInstallPrompt(null));
+
+    return () => {
+      mq.removeEventListener('change', handler);
+      window.removeEventListener('beforeinstallprompt', onBeforeInstall);
+    };
   }, []);
 
   // Auto-scroll messages
@@ -732,12 +756,82 @@ export default function ChatClient() {
 
   return (
     <div style={{ ...S.root, flexDirection: isDesktop ? 'row' : 'column' }}>
+      {/* Android: native install prompt */}
+      {installPrompt && (
+        <div
+          role="banner"
+          style={{
+            position: 'fixed',
+            bottom: isDesktop ? '16px' : 'calc(68px + env(safe-area-inset-bottom))',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            width: 'calc(100% - 32px)',
+            maxWidth: '400px',
+            background: '#151515',
+            border: '1px solid #1a1a1a',
+            borderRadius: '12px',
+            padding: '12px 16px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '12px',
+            zIndex: 100,
+            fontSize: '14px',
+          }}
+        >
+          <span style={{ color: '#e5e5e5', lineHeight: '1.4' }}>
+            Add RA-H to your home screen
+          </span>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button
+              onClick={async () => {
+                await installPrompt.prompt();
+                const { outcome } = await installPrompt.userChoice;
+                if (outcome === 'accepted') setInstallPrompt(null);
+              }}
+              style={{
+                background: '#e5e5e5',
+                color: '#0a0a0a',
+                border: 'none',
+                borderRadius: '8px',
+                padding: '8px 14px',
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+                fontSize: '14px',
+                fontWeight: 600,
+                minHeight: '44px',
+              }}
+              aria-label="Install RA-H app"
+            >
+              Install
+            </button>
+            <button
+              onClick={() => setInstallPrompt(null)}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: '#6b6b6b',
+                cursor: 'pointer',
+                fontSize: '18px',
+                minHeight: '44px',
+                minWidth: '44px',
+                padding: '0',
+              }}
+              aria-label="Dismiss install prompt"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* iOS: manual Add to Home Screen instruction */}
       {showIOSPrompt && (
         <div
           role="banner"
           style={{
             position: 'fixed',
-            bottom: isDesktop ? '16px' : '72px',
+            bottom: isDesktop ? '16px' : 'calc(68px + env(safe-area-inset-bottom))',
             left: '50%',
             transform: 'translateX(-50%)',
             width: 'calc(100% - 32px)',
