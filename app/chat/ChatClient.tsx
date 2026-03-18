@@ -77,6 +77,12 @@ interface GraphEdge {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const RAH_BASE = process.env.NEXT_PUBLIC_RAH_API_URL ?? 'https://ra-hos-production.up.railway.app/api';
+
+function parseDims(dimensions?: string | string[]): string[] {
+  if (!dimensions) return [];
+  if (Array.isArray(dimensions)) return dimensions.filter(Boolean);
+  return dimensions.split(',').map((d) => d.trim()).filter(Boolean);
+}
 const RAH_ORIGIN = RAH_BASE.replace(/\/api$/, '');
 
 const BOOKMARKLET_URL =
@@ -1042,7 +1048,7 @@ export default function ChatClient() {
 
         {searchResults.map((node) => {
           const isExpanded = expandedNode === node.id;
-          const dims = node.dimensions?.split(',').map((d) => d.trim()).filter(Boolean) || [];
+          const dims = parseDims(node.dimensions);
           return (
             <div
               key={node.id}
@@ -1116,7 +1122,7 @@ export default function ChatClient() {
             const edgeCount = graphEdges.filter(
               (e) => e.from_node_id === node.id || e.to_node_id === node.id
             ).length;
-            const dims = node.dimensions?.split(',').map((d) => d.trim()).filter(Boolean) || [];
+            const dims = parseDims(node.dimensions);
             return (
               <div
                 key={node.id}
@@ -1153,7 +1159,7 @@ export default function ChatClient() {
                 )}
                 {selectedNode.dimensions && (
                   <div style={{ ...S.dimBadges, marginTop: '8px' }}>
-                    {selectedNode.dimensions.split(',').map((d) => d.trim()).filter(Boolean).map((d) => (
+                    {parseDims(selectedNode.dimensions).map((d) => (
                       <span key={d} style={S.dimBadge}>{d}</span>
                     ))}
                   </div>
