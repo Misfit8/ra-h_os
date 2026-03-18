@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 export const runtime = 'nodejs';
 
-const RAH_API = 'https://ra-hos-production.up.railway.app/api';
+const RAH_API = process.env.RAH_API_URL ?? 'https://ra-hos-production.up.railway.app/api';
 
 interface RahNode {
   id: number;
@@ -28,7 +28,8 @@ async function fetchRelevantNodes(query: string): Promise<RahNode[]> {
     if (!res.ok) return [];
     const data = await res.json();
     return (data.data as RahNode[]) || [];
-  } catch {
+  } catch (err) {
+    console.error('[fetchRelevantNodes]', err);
     return [];
   }
 }
@@ -62,10 +63,11 @@ Only emit action lines when explicitly asked. Never emit them for normal convers
 async function parseAndExecuteActions(text: string): Promise<ActionTaken[]> {
   const actions: ActionTaken[] = [];
 
-  const nodeRegex = /^CREATE_NODE:\s*(\{.+\})$/gm;
+  const nodeRegex = /^CREATE_NODE:\s*(\{.+?\})$/gm;
   for (const match of text.matchAll(nodeRegex)) {
     try {
       const data = JSON.parse(match[1]);
+      if (!data.title || typeof data.title !== 'string') continue;
       const res = await fetch(`${RAH_API}/nodes`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -78,10 +80,11 @@ async function parseAndExecuteActions(text: string): Promise<ActionTaken[]> {
     }
   }
 
-  const edgeRegex = /^CREATE_EDGE:\s*(\{.+\})$/gm;
+  const edgeRegex = /^CREATE_EDGE:\s*(\{.+?\})$/gm;
   for (const match of text.matchAll(edgeRegex)) {
     try {
       const data = JSON.parse(match[1]);
+      if (!data.from_node_id || !data.to_node_id) continue;
       const res = await fetch(`${RAH_API}/edges`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -129,10 +132,12 @@ export async function POST(request: NextRequest) {
         model: 'claude-sonnet-4-20250514',
         max_tokens: 1024,
         system: systemPrompt,
-        messages: messages.map((m) => ({
-          role: m.role as 'user' | 'assistant',
-          content: m.content,
-        })),
+        messages: messages
+          .filter((m) => m.role === 'user' || m.role === 'assistant')
+          .map((m) => ({
+            role: m.role as 'user' | 'assistant',
+            content: m.content,
+          })),
       }),
     });
 

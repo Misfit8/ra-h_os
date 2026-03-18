@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 export const runtime = 'nodejs';
 
-const RAH_API = 'https://ra-hos-production.up.railway.app/api';
+const RAH_API = process.env.RAH_API_URL ?? 'https://ra-hos-production.up.railway.app/api';
 
 export async function POST(request: NextRequest) {
   try {
@@ -18,6 +18,13 @@ export async function POST(request: NextRequest) {
     if (!title || !title.trim()) {
       return NextResponse.json(
         { success: false, error: 'title is required' },
+        { status: 400 }
+      );
+    }
+
+    if (title.trim().length > 160) {
+      return NextResponse.json(
+        { success: false, error: 'title must be 160 characters or fewer' },
         { status: 400 }
       );
     }

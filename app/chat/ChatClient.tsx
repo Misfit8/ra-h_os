@@ -76,8 +76,11 @@ interface GraphEdge {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
+const RAH_BASE = process.env.NEXT_PUBLIC_RAH_API_URL ?? 'https://ra-hos-production.up.railway.app/api';
+const RAH_ORIGIN = RAH_BASE.replace(/\/api$/, '');
+
 const BOOKMARKLET_URL =
-  "javascript:(function(){var t=encodeURIComponent(document.title),u=encodeURIComponent(window.location.href);window.open('https://ra-hos-production.up.railway.app/chat?tab=save&url='+u+'&title='+t,'_blank');})();";
+  `javascript:(function(){var p=new URLSearchParams({tab:'save',url:window.location.href,title:document.title});window.open('${RAH_ORIGIN}/chat?'+p.toString(),'_blank');})();`;
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: 'chat', label: 'Chat', icon: '💬' },
@@ -582,7 +585,9 @@ const S = {
 export default function ChatClient() {
   const searchParams = useSearchParams();
 
-  const initialTab = (searchParams.get('tab') as Tab) || 'chat';
+  const VALID_TABS: Tab[] = ['chat', 'save', 'search', 'graph'];
+  const rawTab = searchParams.get('tab');
+  const initialTab: Tab = VALID_TABS.includes(rawTab as Tab) ? (rawTab as Tab) : 'chat';
   const initialUrl = searchParams.get('url') || '';
   const initialTitle = searchParams.get('title') || '';
   const initialText = searchParams.get('text') || '';
@@ -729,18 +734,19 @@ export default function ChatClient() {
     setIsLoadingGraph(true);
     setGraphError(null);
     try {
-      const BASE = 'https://ra-hos-production.up.railway.app/api';
       const [hubsRes, allRes, edgesRes] = await Promise.all([
-        fetch(`${BASE}/nodes?sortBy=edges&limit=20`),
-        fetch(`${BASE}/nodes?limit=200`),
-        fetch(`${BASE}/edges`),
+        fetch(`${RAH_BASE}/nodes?sortBy=edges&limit=20`),
+        fetch(`${RAH_BASE}/nodes?limit=200`),
+        fetch(`${RAH_BASE}/edges`),
       ]);
       if (!hubsRes.ok || !allRes.ok || !edgesRes.ok) throw new Error('Failed to load graph data');
       const [hubs, all, edges] = await Promise.all([
         hubsRes.json(), allRes.json(), edgesRes.json(),
       ]);
       const nodeMap = new Map<number, SearchNode>();
-      for (const n of (all.data as SearchNode[])) nodeMap.set(n.id, n);
+      for (const n of ((all.data as SearchNode[]) || [])) {
+        if (n?.id) nodeMap.set(n.id, n);
+      }
       setGraphHubs((hubs.data as SearchNode[]) || []);
       setAllGraphNodes(nodeMap);
       setGraphEdges((edges.data as GraphEdge[]) || []);
@@ -767,7 +773,7 @@ export default function ChatClient() {
 
     try {
       const res = await fetch(
-        `https://ra-hos-production.up.railway.app/api/nodes/search?q=${encodeURIComponent(q.slice(0, 200))}&limit=20`
+        `${RAH_BASE}/nodes/search?q=${encodeURIComponent(q.slice(0, 200))}&limit=20`
       );
       if (!res.ok) throw new Error(`Search failed: ${res.status}`);
       const data = await res.json();
