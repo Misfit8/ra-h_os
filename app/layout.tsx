@@ -4,6 +4,7 @@ import { DimensionIconsProvider } from '@/context/DimensionIconsContext';
 export const metadata = {
   title: 'RA-H Open Source',
   description: 'Local-first research workspace with a BYO-key AI orchestrator',
+  manifest: '/manifest.json',
 };
 
 export default function RootLayout({
