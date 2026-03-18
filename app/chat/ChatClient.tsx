@@ -605,11 +605,11 @@ export default function ChatClient() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Graph state
-  const [graphLoaded, setGraphLoaded] = useState(false);
+  const graphFetchedRef = useRef(false);
   const [isLoadingGraph, setIsLoadingGraph] = useState(false);
   const [graphError, setGraphError] = useState<string | null>(null);
   const [graphHubs, setGraphHubs] = useState<SearchNode[]>([]);
-  const [allGraphNodes, setAllGraphNodes] = useState<Map<number, SearchNode>>(new Map());
+  const [allGraphNodes, setAllGraphNodes] = useState<Record<number, SearchNode>>({});
   const [graphEdges, setGraphEdges] = useState<GraphEdge[]>([]);
   const [selectedGraphId, setSelectedGraphId] = useState<number | null>(null);
 
@@ -729,38 +729,35 @@ export default function ChatClient() {
     }
   };
 
-  const loadGraph = useCallback(async () => {
-    if (graphLoaded || isLoadingGraph) return;
+  useEffect(() => {
+    if (activeTab !== 'graph' || graphFetchedRef.current) return;
+    graphFetchedRef.current = true;
     setIsLoadingGraph(true);
     setGraphError(null);
-    try {
-      const [hubsRes, allRes, edgesRes] = await Promise.all([
-        fetch(`${RAH_BASE}/nodes?sortBy=edges&limit=20`),
-        fetch(`${RAH_BASE}/nodes?limit=200`),
-        fetch(`${RAH_BASE}/edges`),
-      ]);
-      if (!hubsRes.ok || !allRes.ok || !edgesRes.ok) throw new Error('Failed to load graph data');
-      const [hubs, all, edges] = await Promise.all([
-        hubsRes.json(), allRes.json(), edgesRes.json(),
-      ]);
-      const nodeMap = new Map<number, SearchNode>();
-      for (const n of ((all.data as SearchNode[]) || [])) {
-        if (n?.id) nodeMap.set(n.id, n);
-      }
-      setGraphHubs((hubs.data as SearchNode[]) || []);
-      setAllGraphNodes(nodeMap);
-      setGraphEdges((edges.data as GraphEdge[]) || []);
-      setGraphLoaded(true);
-    } catch (err) {
-      setGraphError(err instanceof Error ? err.message : 'Failed to load graph');
-    } finally {
-      setIsLoadingGraph(false);
-    }
-  }, [graphLoaded, isLoadingGraph]);
-
-  useEffect(() => {
-    if (activeTab === 'graph') loadGraph();
-  }, [activeTab, loadGraph]);
+    Promise.all([
+      fetch(`${RAH_BASE}/nodes?sortBy=edges&limit=20`),
+      fetch(`${RAH_BASE}/nodes?limit=200`),
+      fetch(`${RAH_BASE}/edges`),
+    ])
+      .then(([hubsRes, allRes, edgesRes]) => {
+        if (!hubsRes.ok || !allRes.ok || !edgesRes.ok) throw new Error('Failed to load graph data');
+        return Promise.all([hubsRes.json(), allRes.json(), edgesRes.json()]);
+      })
+      .then(([hubs, all, edges]) => {
+        const nodeRecord: Record<number, SearchNode> = {};
+        for (const n of ((all.data as SearchNode[]) || [])) {
+          if (n?.id) nodeRecord[n.id] = n;
+        }
+        setGraphHubs((hubs.data as SearchNode[]) || []);
+        setAllGraphNodes(nodeRecord);
+        setGraphEdges((edges.data as GraphEdge[]) || []);
+      })
+      .catch((err) => {
+        setGraphError(err instanceof Error ? err.message : 'Failed to load graph');
+        graphFetchedRef.current = false;
+      })
+      .finally(() => setIsLoadingGraph(false));
+  }, [activeTab]);
 
   const handleSearch = async (e?: FormEvent) => {
     e?.preventDefault();
@@ -1088,7 +1085,7 @@ export default function ChatClient() {
   );
 
   const renderGraph = () => {
-    const selectedNode = selectedGraphId !== null ? allGraphNodes.get(selectedGraphId) : null;
+    const selectedNode = selectedGraphId !== null ? allGraphNodes[selectedGraphId] : null;
     const connections = selectedGraphId !== null
       ? graphEdges.filter((e) => e.from_node_id === selectedGraphId || e.to_node_id === selectedGraphId)
       : [];
@@ -1103,7 +1100,7 @@ export default function ChatClient() {
           ) : (
             <span>Top nodes by connections</span>
           )}
-          <span>{allGraphNodes.size} nodes · {graphEdges.length} edges</span>
+          <span>{Object.keys(allGraphNodes).length} nodes · {graphEdges.length} edges</span>
         </div>
 
         <div style={S.graphList} role="list">
@@ -1172,7 +1169,7 @@ export default function ChatClient() {
               <div style={S.connectionList}>
                 {connections.map((edge) => {
                   const neighborId = edge.from_node_id === selectedGraphId ? edge.to_node_id : edge.from_node_id;
-                  const neighbor = allGraphNodes.get(neighborId);
+                  const neighbor = allGraphNodes[neighborId];
                   const direction = edge.from_node_id === selectedGraphId ? '→' : '←';
                   return (
                     <div
