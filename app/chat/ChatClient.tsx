@@ -64,6 +64,16 @@ interface SearchNode {
   link?: string;
 }
 
+interface GraphEdge {
+  id: number;
+  from_node_id: number;
+  to_node_id: number;
+  context?: {
+    type?: string;
+    explanation?: string;
+  };
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const BOOKMARKLET_URL =
@@ -388,6 +398,110 @@ const S = {
     fontWeight: 500,
   },
 
+  // Graph tab
+  graphPanel: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column' as const,
+    overflow: 'hidden',
+  },
+
+  graphHeader: {
+    padding: '12px 16px',
+    borderBottom: '1px solid #1a1a1a',
+    fontSize: '13px',
+    color: '#6b6b6b',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+
+  graphList: {
+    flex: 1,
+    overflowY: 'auto' as const,
+    padding: '12px 16px',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: '8px',
+  },
+
+  hubCard: (selected: boolean): React.CSSProperties => ({
+    background: selected ? '#151515' : '#111111',
+    border: `1px solid ${selected ? '#353535' : '#1a1a1a'}`,
+    borderRadius: '10px',
+    padding: '12px 14px',
+    cursor: 'pointer',
+  }),
+
+  hubTitle: {
+    fontSize: '15px',
+    fontWeight: 600,
+    color: '#e5e5e5',
+    lineHeight: '1.4',
+    marginBottom: '4px',
+  },
+
+  hubMeta: {
+    fontSize: '12px',
+    color: '#6b6b6b',
+    display: 'flex',
+    gap: '10px',
+    alignItems: 'center',
+    marginBottom: '4px',
+  },
+
+  edgeDot: {
+    display: 'inline-block',
+    width: '6px',
+    height: '6px',
+    borderRadius: '50%',
+    background: '#353535',
+    marginRight: '4px',
+  },
+
+  connectionList: {
+    marginTop: '10px',
+    paddingTop: '10px',
+    borderTop: '1px solid #1a1a1a',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: '6px',
+  },
+
+  connectionItem: {
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: '2px',
+    padding: '8px 10px',
+    background: '#0d0d0d',
+    borderRadius: '6px',
+    cursor: 'pointer',
+  },
+
+  connectionTitle: {
+    fontSize: '13px',
+    fontWeight: 500,
+    color: '#e5e5e5',
+  },
+
+  connectionRel: {
+    fontSize: '11px',
+    color: '#6b6b6b',
+    fontStyle: 'italic' as const,
+  },
+
+  backBtn: {
+    background: 'transparent',
+    border: 'none',
+    color: '#6b6b6b',
+    cursor: 'pointer',
+    fontSize: '13px',
+    padding: '0',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+  },
+
   // Stub tabs
   stub: {
     flex: 1,
@@ -484,6 +598,15 @@ export default function ChatClient() {
   const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Graph state
+  const [graphLoaded, setGraphLoaded] = useState(false);
+  const [isLoadingGraph, setIsLoadingGraph] = useState(false);
+  const [graphError, setGraphError] = useState<string | null>(null);
+  const [graphHubs, setGraphHubs] = useState<SearchNode[]>([]);
+  const [allGraphNodes, setAllGraphNodes] = useState<Map<number, SearchNode>>(new Map());
+  const [graphEdges, setGraphEdges] = useState<GraphEdge[]>([]);
+  const [selectedGraphId, setSelectedGraphId] = useState<number | null>(null);
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('');
@@ -600,6 +723,38 @@ export default function ChatClient() {
       sendMessage();
     }
   };
+
+  const loadGraph = useCallback(async () => {
+    if (graphLoaded || isLoadingGraph) return;
+    setIsLoadingGraph(true);
+    setGraphError(null);
+    try {
+      const BASE = 'https://ra-hos-production.up.railway.app/api';
+      const [hubsRes, allRes, edgesRes] = await Promise.all([
+        fetch(`${BASE}/nodes?sortBy=edges&limit=20`),
+        fetch(`${BASE}/nodes?limit=200`),
+        fetch(`${BASE}/edges`),
+      ]);
+      if (!hubsRes.ok || !allRes.ok || !edgesRes.ok) throw new Error('Failed to load graph data');
+      const [hubs, all, edges] = await Promise.all([
+        hubsRes.json(), allRes.json(), edgesRes.json(),
+      ]);
+      const nodeMap = new Map<number, SearchNode>();
+      for (const n of (all.data as SearchNode[])) nodeMap.set(n.id, n);
+      setGraphHubs((hubs.data as SearchNode[]) || []);
+      setAllGraphNodes(nodeMap);
+      setGraphEdges((edges.data as GraphEdge[]) || []);
+      setGraphLoaded(true);
+    } catch (err) {
+      setGraphError(err instanceof Error ? err.message : 'Failed to load graph');
+    } finally {
+      setIsLoadingGraph(false);
+    }
+  }, [graphLoaded, isLoadingGraph]);
+
+  useEffect(() => {
+    if (activeTab === 'graph') loadGraph();
+  }, [activeTab, loadGraph]);
 
   const handleSearch = async (e?: FormEvent) => {
     e?.preventDefault();
@@ -926,15 +1081,117 @@ export default function ChatClient() {
     </div>
   );
 
-  const renderGraph = () => (
-    <div style={S.stub} aria-label="Graph — coming soon">
-      <div style={S.stubIcon}>🕸️</div>
-      <div style={S.stubText}>Graph — coming soon</div>
-      <div style={{ fontSize: '14px', color: '#6b6b6b', maxWidth: '260px', textAlign: 'center' }}>
-        Interactive knowledge graph visualization will live here.
+  const renderGraph = () => {
+    const selectedNode = selectedGraphId !== null ? allGraphNodes.get(selectedGraphId) : null;
+    const connections = selectedGraphId !== null
+      ? graphEdges.filter((e) => e.from_node_id === selectedGraphId || e.to_node_id === selectedGraphId)
+      : [];
+
+    return (
+      <div style={S.graphPanel} aria-label="Knowledge graph">
+        <div style={S.graphHeader}>
+          {selectedNode ? (
+            <button style={S.backBtn} onClick={() => setSelectedGraphId(null)} aria-label="Back to hub nodes">
+              ← Back
+            </button>
+          ) : (
+            <span>Top nodes by connections</span>
+          )}
+          <span>{allGraphNodes.size} nodes · {graphEdges.length} edges</span>
+        </div>
+
+        <div style={S.graphList} role="list">
+          {isLoadingGraph && (
+            <div style={{ color: '#6b6b6b', textAlign: 'center', marginTop: '40px' }}>Loading…</div>
+          )}
+          {graphError && (
+            <div style={S.errorBanner} role="alert">{graphError}</div>
+          )}
+
+          {/* Hub node list */}
+          {!isLoadingGraph && !selectedNode && graphHubs.map((node) => {
+            const edgeCount = graphEdges.filter(
+              (e) => e.from_node_id === node.id || e.to_node_id === node.id
+            ).length;
+            const dims = node.dimensions?.split(',').map((d) => d.trim()).filter(Boolean) || [];
+            return (
+              <div
+                key={node.id}
+                role="listitem"
+                style={S.hubCard(false)}
+                onClick={() => setSelectedGraphId(node.id)}
+                aria-label={`Node: ${node.title}, ${edgeCount} connections`}
+              >
+                <div style={S.hubTitle}>{node.title}</div>
+                <div style={S.hubMeta}>
+                  <span><span style={S.edgeDot} />{edgeCount} connections</span>
+                  {dims.slice(0, 2).map((d) => (
+                    <span key={d} style={S.dimBadge}>{d}</span>
+                  ))}
+                </div>
+                {node.description && (
+                  <div style={{ fontSize: '12px', color: '#6b6b6b', lineHeight: '1.4' }}>
+                    {node.description}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {/* Selected node + connections */}
+          {!isLoadingGraph && selectedNode && (
+            <>
+              <div style={{ ...S.hubCard(true), cursor: 'default' }}>
+                <div style={S.hubTitle}>{selectedNode.title}</div>
+                {selectedNode.description && (
+                  <div style={{ fontSize: '13px', color: '#9b9b9b', lineHeight: '1.5', marginTop: '4px' }}>
+                    {selectedNode.description}
+                  </div>
+                )}
+                {selectedNode.dimensions && (
+                  <div style={{ ...S.dimBadges, marginTop: '8px' }}>
+                    {selectedNode.dimensions.split(',').map((d) => d.trim()).filter(Boolean).map((d) => (
+                      <span key={d} style={S.dimBadge}>{d}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {connections.length > 0 && (
+                <div style={{ fontSize: '12px', color: '#6b6b6b', padding: '4px 2px' }}>
+                  {connections.length} connection{connections.length !== 1 ? 's' : ''}
+                </div>
+              )}
+
+              <div style={S.connectionList}>
+                {connections.map((edge) => {
+                  const neighborId = edge.from_node_id === selectedGraphId ? edge.to_node_id : edge.from_node_id;
+                  const neighbor = allGraphNodes.get(neighborId);
+                  const direction = edge.from_node_id === selectedGraphId ? '→' : '←';
+                  return (
+                    <div
+                      key={edge.id}
+                      style={S.connectionItem}
+                      onClick={() => setSelectedGraphId(neighborId)}
+                      role="button"
+                      aria-label={`Connected to ${neighbor?.title || `Node ${neighborId}`}`}
+                    >
+                      <div style={S.connectionTitle}>
+                        {direction} {neighbor?.title || `Node ${neighborId}`}
+                      </div>
+                      {edge.context?.explanation && (
+                        <div style={S.connectionRel}>{edge.context.explanation}</div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   const tabContent: Record<Tab, () => React.ReactNode> = {
     chat: renderChat,
