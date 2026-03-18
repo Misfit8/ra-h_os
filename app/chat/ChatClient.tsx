@@ -471,6 +471,7 @@ export default function ChatClient() {
   const initialTab = (searchParams.get('tab') as Tab) || 'chat';
   const initialUrl = searchParams.get('url') || '';
   const initialTitle = searchParams.get('title') || '';
+  const initialText = searchParams.get('text') || '';
 
   const [activeTab, setActiveTab] = useState<Tab>(initialTab);
   const [isDesktop, setIsDesktop] = useState(false);
@@ -495,7 +496,7 @@ export default function ChatClient() {
   const [saveForm, setSaveForm] = useState<SaveForm>({
     title: initialTitle,
     description: '',
-    content: '',
+    content: initialText,
     url: initialUrl,
     type: 'research',
   });
