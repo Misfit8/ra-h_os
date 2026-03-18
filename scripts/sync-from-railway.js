@@ -1,12 +1,13 @@
 // Sync nodes from Railway production → local RA-H SQLite
 // Run: node scripts/sync-from-railway.js
 //
-// Fetches all nodes from the deployed Railway instance and upserts them
-// into the local SQLite so Claude Code MCP and Claude AI desktop can see them.
+// Uses railway_id stored in metadata to track synced nodes — never
+// conflicts with local node IDs. Safe to run repeatedly.
 
 const Database = require('better-sqlite3');
 const path = require('path');
 const os = require('os');
+const fs = require('fs');
 
 const RAILWAY_API = 'https://ra-hos-production.up.railway.app/api';
 const PAGE_SIZE = 100;
@@ -14,16 +15,14 @@ const PAGE_SIZE = 100;
 function getLocalDbPath() {
   if (process.env.SQLITE_DB_PATH) return process.env.SQLITE_DB_PATH;
   const home = os.homedir();
-  // Try paths in order, return first that exists
   const candidates = [
     path.join(home, 'Library', 'Application Support', 'RA-H', 'db', 'rah.sqlite'),
     path.join(home, 'AppData', 'Roaming', 'RA-H', 'db', 'rah.sqlite'),
   ];
-  const fs = require('fs');
   for (const p of candidates) {
     if (fs.existsSync(p)) return p;
   }
-  return candidates[0]; // fallback with useful error message
+  return candidates[0];
 }
 
 async function fetchAllNodes() {
@@ -58,15 +57,26 @@ async function main() {
   db.pragma('foreign_keys = ON');
   db.pragma('journal_mode = WAL');
 
-  const upsertNode = db.prepare(`
-    INSERT INTO nodes (id, title, description, notes, link, created_at, updated_at)
-    VALUES (@id, @title, @description, @notes, @link, @created_at, @updated_at)
-    ON CONFLICT(id) DO UPDATE SET
-      title       = excluded.title,
-      description = excluded.description,
-      notes       = excluded.notes,
-      link        = excluded.link,
-      updated_at  = excluded.updated_at
+  // Find existing synced node by its Railway ID stored in metadata
+  const findByRailwayId = db.prepare(
+    `SELECT id FROM nodes WHERE json_extract(metadata, '$.railway_id') = ?`
+  );
+
+  // Insert new node without specifying ID — let SQLite auto-assign
+  const insertNode = db.prepare(`
+    INSERT INTO nodes (title, description, notes, link, metadata, created_at, updated_at)
+    VALUES (@title, @description, @notes, @link, @metadata, @created_at, @updated_at)
+  `);
+
+  // Update existing synced node
+  const updateNode = db.prepare(`
+    UPDATE nodes SET
+      title       = @title,
+      description = @description,
+      notes       = @notes,
+      link        = @link,
+      updated_at  = @updated_at
+    WHERE id = @localId
   `);
 
   const deleteDims = db.prepare('DELETE FROM node_dimensions WHERE node_id = ?');
@@ -81,35 +91,44 @@ async function main() {
 
   const sync = db.transaction((nodes) => {
     for (const node of nodes) {
-      const existing = db.prepare('SELECT id FROM nodes WHERE id = ?').get(node.id);
+      const existing = findByRailwayId.get(node.id);
 
-      upsertNode.run({
-        id:          node.id,
+      const rawDims = node.dimensions;
+      const dims = Array.isArray(rawDims)
+        ? rawDims
+        : (rawDims || '').split(',').map((d) => d.trim()).filter(Boolean);
+
+      const fields = {
         title:       node.title       || '',
         description: node.description || null,
         notes:       node.notes       || null,
         link:        node.link        || null,
         created_at:  node.created_at  || new Date().toISOString(),
         updated_at:  node.updated_at  || new Date().toISOString(),
-      });
+      };
 
-      // Sync dimensions — API returns array or comma-string
-      const rawDims = node.dimensions;
-      const dims = Array.isArray(rawDims)
-        ? rawDims
-        : (rawDims || '').split(',').map((d) => d.trim()).filter(Boolean);
-
-      deleteDims.run(node.id);
-      for (const dim of dims) {
-        insertDim.run(node.id, dim);
+      let localId;
+      if (existing) {
+        localId = existing.id;
+        updateNode.run({ ...fields, localId });
+        updated++;
+      } else {
+        const result = insertNode.run({
+          ...fields,
+          metadata: JSON.stringify({ railway_id: node.id, source: 'railway-sync' }),
+        });
+        localId = result.lastInsertRowid;
+        inserted++;
       }
 
-      if (existing) updated++; else inserted++;
+      deleteDims.run(localId);
+      for (const dim of dims) {
+        insertDim.run(localId, dim);
+      }
     }
   });
 
   sync(nodes);
-
   console.log(`Done — ${inserted} inserted, ${updated} updated`);
   db.close();
 }
