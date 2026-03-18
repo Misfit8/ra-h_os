@@ -14,11 +14,16 @@ const PAGE_SIZE = 100;
 function getLocalDbPath() {
   if (process.env.SQLITE_DB_PATH) return process.env.SQLITE_DB_PATH;
   const home = os.homedir();
-  if (process.platform === 'win32') {
-    const appdata = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
-    return path.join(appdata, 'RA-H', 'db', 'rah.sqlite');
+  // Try paths in order, return first that exists
+  const candidates = [
+    path.join(home, 'Library', 'Application Support', 'RA-H', 'db', 'rah.sqlite'),
+    path.join(home, 'AppData', 'Roaming', 'RA-H', 'db', 'rah.sqlite'),
+  ];
+  const fs = require('fs');
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
   }
-  return path.join(home, 'Library', 'Application Support', 'RA-H', 'db', 'rah.sqlite');
+  return candidates[0]; // fallback with useful error message
 }
 
 async function fetchAllNodes() {
@@ -88,11 +93,11 @@ async function main() {
         updated_at:  node.updated_at  || new Date().toISOString(),
       });
 
-      // Sync dimensions
-      const dims = (node.dimensions || '')
-        .split(',')
-        .map((d) => d.trim())
-        .filter(Boolean);
+      // Sync dimensions — API returns array or comma-string
+      const rawDims = node.dimensions;
+      const dims = Array.isArray(rawDims)
+        ? rawDims
+        : (rawDims || '').split(',').map((d) => d.trim()).filter(Boolean);
 
       deleteDims.run(node.id);
       for (const dim of dims) {
