@@ -55,6 +55,15 @@ interface SaveForm {
   type: string;
 }
 
+interface SearchNode {
+  id: number;
+  title: string;
+  description?: string;
+  notes?: string;
+  dimensions?: string;
+  link?: string;
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const BOOKMARKLET_URL =
@@ -304,6 +313,81 @@ const S = {
     transition: 'background 0.1s, color 0.1s',
   }),
 
+  // Search tab
+  searchPanel: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column' as const,
+    overflow: 'hidden',
+  },
+
+  searchInputRow: {
+    display: 'flex',
+    gap: '8px',
+    padding: '12px 16px',
+    borderBottom: '1px solid #1a1a1a',
+  },
+
+  searchResults: {
+    flex: 1,
+    overflowY: 'auto' as const,
+    padding: '12px 16px',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: '10px',
+  },
+
+  nodeCard: (expanded: boolean): React.CSSProperties => ({
+    background: '#111111',
+    border: '1px solid #1a1a1a',
+    borderRadius: '10px',
+    padding: '12px 14px',
+    cursor: 'pointer',
+    transition: 'border-color 0.1s',
+    borderColor: expanded ? '#353535' : '#1a1a1a',
+  }),
+
+  nodeTitle: {
+    fontSize: '15px',
+    fontWeight: 600,
+    color: '#e5e5e5',
+    lineHeight: '1.4',
+    marginBottom: '4px',
+  },
+
+  nodeDescription: {
+    fontSize: '13px',
+    color: '#9b9b9b',
+    lineHeight: '1.5',
+    marginBottom: '8px',
+  },
+
+  nodeNotes: {
+    fontSize: '13px',
+    color: '#6b6b6b',
+    lineHeight: '1.6',
+    marginTop: '8px',
+    paddingTop: '8px',
+    borderTop: '1px solid #1a1a1a',
+    whiteSpace: 'pre-wrap' as const,
+    wordBreak: 'break-word' as const,
+  },
+
+  dimBadges: {
+    display: 'flex',
+    flexWrap: 'wrap' as const,
+    gap: '4px',
+  },
+
+  dimBadge: {
+    fontSize: '11px',
+    color: '#6b6b6b',
+    background: '#1a1a1a',
+    borderRadius: '4px',
+    padding: '2px 6px',
+    fontWeight: 500,
+  },
+
   // Stub tabs
   stub: {
     flex: 1,
@@ -399,6 +483,13 @@ export default function ChatClient() {
   const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Search state
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<SearchNode[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [expandedNode, setExpandedNode] = useState<number | null>(null);
 
   // Save state
   const [saveForm, setSaveForm] = useState<SaveForm>({
@@ -506,6 +597,30 @@ export default function ChatClient() {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
+    }
+  };
+
+  const handleSearch = async (e?: FormEvent) => {
+    e?.preventDefault();
+    const q = searchQuery.trim();
+    if (!q || isSearching) return;
+
+    setIsSearching(true);
+    setSearchError(null);
+    setExpandedNode(null);
+
+    try {
+      const res = await fetch(
+        `https://ra-hos-production.up.railway.app/api/nodes/search?q=${encodeURIComponent(q.slice(0, 200))}&limit=20`
+      );
+      if (!res.ok) throw new Error(`Search failed: ${res.status}`);
+      const data = await res.json();
+      setSearchResults((data.data as SearchNode[]) || []);
+    } catch (err) {
+      setSearchError(err instanceof Error ? err.message : 'Search failed');
+      setSearchResults([]);
+    } finally {
+      setIsSearching(false);
     }
   };
 
@@ -726,11 +841,86 @@ export default function ChatClient() {
   );
 
   const renderSearch = () => (
-    <div style={S.stub} aria-label="Search — coming soon">
-      <div style={S.stubIcon}>🔍</div>
-      <div style={S.stubText}>Search — coming soon</div>
-      <div style={{ fontSize: '14px', color: '#6b6b6b', maxWidth: '260px', textAlign: 'center' }}>
-        Full semantic search across your knowledge graph will live here.
+    <div style={S.searchPanel} aria-label="Search knowledge graph">
+      <form onSubmit={handleSearch} style={S.searchInputRow}>
+        <label htmlFor="search-input" style={{ display: 'none' }}>Search</label>
+        <input
+          id="search-input"
+          type="search"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          placeholder="Search your knowledge graph…"
+          style={{ ...S.input, flex: 1, margin: 0 }}
+          aria-label="Search query"
+          autoComplete="off"
+        />
+        <button
+          type="submit"
+          disabled={!searchQuery.trim() || isSearching}
+          style={S.sendBtn(!searchQuery.trim() || isSearching)}
+          aria-label="Search"
+        >
+          {isSearching ? '…' : 'Go'}
+        </button>
+      </form>
+
+      <div style={S.searchResults} role="list" aria-label="Search results">
+        {searchError && (
+          <div style={S.errorBanner} role="alert">{searchError}</div>
+        )}
+
+        {!isSearching && searchResults.length === 0 && searchQuery && !searchError && (
+          <div style={{ color: '#6b6b6b', fontSize: '14px', textAlign: 'center', marginTop: '32px' }}>
+            No results found.
+          </div>
+        )}
+
+        {!isSearching && searchResults.length === 0 && !searchQuery && (
+          <div style={{ color: '#6b6b6b', fontSize: '14px', textAlign: 'center', marginTop: '32px' }}>
+            Search across all nodes in your graph.
+          </div>
+        )}
+
+        {searchResults.map((node) => {
+          const isExpanded = expandedNode === node.id;
+          const dims = node.dimensions?.split(',').map((d) => d.trim()).filter(Boolean) || [];
+          return (
+            <div
+              key={node.id}
+              role="listitem"
+              style={S.nodeCard(isExpanded)}
+              onClick={() => setExpandedNode(isExpanded ? null : node.id)}
+              aria-expanded={isExpanded}
+              aria-label={`Node: ${node.title}`}
+            >
+              <div style={S.nodeTitle}>{node.title}</div>
+              {node.description && (
+                <div style={S.nodeDescription}>{node.description}</div>
+              )}
+              {dims.length > 0 && (
+                <div style={S.dimBadges}>
+                  {dims.map((d) => (
+                    <span key={d} style={S.dimBadge}>{d}</span>
+                  ))}
+                </div>
+              )}
+              {isExpanded && node.notes && (
+                <div style={S.nodeNotes}>{node.notes}</div>
+              )}
+              {isExpanded && node.link && (
+                <a
+                  href={node.link}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  style={{ display: 'block', fontSize: '12px', color: '#6b6b6b', marginTop: '8px', wordBreak: 'break-all' }}
+                >
+                  {node.link}
+                </a>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
