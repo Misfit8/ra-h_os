@@ -1,7 +1,6 @@
 import { tool } from 'ai';
 import { z } from 'zod';
 import { nodeService } from '@/services/database/nodes';
-
 export const getNodesByIdTool = tool({
   description: 'Load full node records by IDs',
   inputSchema: z.object({
@@ -17,7 +16,6 @@ export const getNodesByIdTool = tool({
         data: { nodes: [] },
       };
     }
-
     const nodes = await Promise.all(
       uniqueIds.map(async id => {
         try {
@@ -30,10 +28,11 @@ export const getNodesByIdTool = tool({
                 .join(' ')
                 .trim()
             : undefined;
-
           return {
             id: node.id,
             title: node.title,
+            description: node.description || null,
+            content: node.notes || null,
             link: node.link,
             dimensions: node.dimensions || [],
             chunk_status: node.chunk_status || 'unknown',
@@ -47,9 +46,7 @@ export const getNodesByIdTool = tool({
         }
       })
     );
-
     const foundNodes = nodes.filter(Boolean);
-
     return {
       success: true,
       data: {
